@@ -99,4 +99,29 @@ describe("registerCommands", () => {
 			"warning",
 		);
 	});
+
+	it("shows rotation policy as info instead of a selectable menu", async () => {
+		const registerCommand = vi.fn();
+		registerCommands(
+			{ registerCommand } as never,
+			createAccountManagerMock(),
+			createStatusControllerMock(),
+		);
+
+		const commandOptions = registerCommand.mock.calls[0]?.[1] as {
+			handler: (args: string, ctx: unknown) => Promise<void>;
+		};
+		const notify = vi.fn();
+		const select = vi.fn();
+		await commandOptions.handler("rotation", {
+			hasUI: true,
+			ui: { notify, select },
+		});
+
+		expect(select).not.toHaveBeenCalled();
+		expect(notify).toHaveBeenCalledWith(
+			expect.stringContaining("Current policy"),
+			"info",
+		);
+	});
 });

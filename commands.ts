@@ -734,12 +734,7 @@ async function runRotationSubcommand(
 		"If pi auth is active, it participates in rotation as an ephemeral account without being persisted.",
 	];
 
-	if (!ctx.hasUI) {
-		ctx.ui.notify(lines.join(" "), "info");
-		return;
-	}
-
-	await ctx.ui.select("MultiCodex Rotation", lines);
+	ctx.ui.notify(lines.join("\n"), "info");
 }
 
 async function isWritableDirectoryFor(filePath: string): Promise<boolean> {
