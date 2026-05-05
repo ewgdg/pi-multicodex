@@ -20,10 +20,10 @@ import { normalizeUnknownError } from "pi-provider-utils/streams";
 import type { AccountManager } from "./account-manager";
 import { openLoginInBrowser } from "./browser";
 import {
+	type createUsageStatusController,
 	formatUsageSummaryText,
 	loadFooterPreferences,
 	type PercentDisplayMode,
-	type createUsageStatusController,
 } from "./status";
 import { type Account, STORAGE_FILE } from "./storage";
 import { isUsageUntouched } from "./usage";
@@ -607,7 +607,11 @@ async function openAccountManagementFlow(
 			continue;
 		}
 
-		const result = await openAccountManagementPanel(ctx, accountManager, usageMode);
+		const result = await openAccountManagementPanel(
+			ctx,
+			accountManager,
+			usageMode,
+		);
 		if (!result) return;
 
 		if (result.action === "add") {
@@ -722,7 +726,9 @@ async function runRotationSubcommand(
 	ctx: ExtensionCommandContext,
 ): Promise<void> {
 	const lines = [
-		"Current policy: manual account first, then untouched accounts, then earliest weekly reset, then random fallback.",
+		"Current policy: session-start selection, then sticky active account for later requests.",
+		"Session selection prefers manual account, then untouched accounts, then lowest max 5h/weekly usage, then earliest weekly reset, then random fallback.",
+		"Per request, MultiCodex keeps the active account to preserve provider prompt cache affinity.",
 		"If token validation fails before a request starts, MultiCodex skips that account and retries another one.",
 		"If a request hits quota or rate limit before any output streams, MultiCodex marks the account on cooldown and retries.",
 		"If pi auth is active, it participates in rotation as an ephemeral account without being persisted.",
@@ -885,12 +891,7 @@ async function runRefreshSubcommand(
 		await openAccountManagementFlow(pi, ctx, accountManager, statusController);
 		return;
 	}
-	await refreshSingleAccount(
-		ctx,
-		accountManager,
-		rest,
-		await loadUsageMode(),
-	);
+	await refreshSingleAccount(ctx, accountManager, rest, await loadUsageMode());
 	await statusController.refreshFor(ctx);
 }
 

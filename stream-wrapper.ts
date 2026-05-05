@@ -53,6 +53,14 @@ export function createStreamWrapper(
 						if (accountManager.hasManualAccount()) {
 							accountManager.clearManualAccount();
 						}
+						// Keep the session's active account sticky so provider-side prompt
+						// cache stays warm across turns. Re-rank only when active is unusable.
+						account = accountManager.getAvailableActiveAccount({
+							excludeEmails: excludedEmails,
+							now,
+						});
+					}
+					if (!account) {
 						account = await accountManager.activateBestAccount({
 							excludeEmails: excludedEmails,
 							signal: options?.signal,

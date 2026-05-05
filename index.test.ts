@@ -369,7 +369,61 @@ describe("manual account selection", () => {
 		expect(headerEmail).toBe("manual@example.com");
 	});
 
-	it("falls back to auto selection when manual is unavailable", async () => {
+	it("uses the active account without reselecting on each request", async () => {
+		const active = makeAccount("active@example.com");
+		let activateCalled = false;
+		let headerEmail: string | undefined;
+
+		const accountManager = {
+			waitUntilReady: async () => {},
+			syncImportedOpenAICodexAuth: async () => false,
+			getAvailableManualAccount: () => undefined,
+			hasManualAccount: () => false,
+			clearManualAccount: () => {},
+			getAvailableActiveAccount: () => active,
+			activateBestAccount: async () => {
+				activateCalled = true;
+				return undefined;
+			},
+			ensureValidToken: async () => "active-token",
+			handleQuotaExceeded: async () => {},
+		} as unknown as AccountManager;
+
+		const baseProvider = {
+			streamSimple: (
+				model: { headers?: Record<string, string> },
+				_context: unknown,
+				_options?: unknown,
+			) => {
+				headerEmail = model.headers?.["X-Multicodex-Account"];
+				async function* inner() {
+					yield { type: "done" };
+				}
+				return inner() as unknown as AsyncIterable<unknown>;
+			},
+		};
+
+		const stream = createStreamWrapper(
+			accountManager,
+			baseProvider as unknown as BaseProvider,
+		)(
+			{
+				id: "test",
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+			} as StreamModel,
+			{} as StreamContext,
+		);
+
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect(activateCalled).toBe(false);
+		expect(headerEmail).toBe("active@example.com");
+	});
+
+	it("falls back to auto selection when manual and active accounts are unavailable", async () => {
 		const auto = makeAccount("auto@example.com");
 		let cleared = false;
 		let headerEmail: string | undefined;
@@ -382,6 +436,7 @@ describe("manual account selection", () => {
 			clearManualAccount: () => {
 				cleared = true;
 			},
+			getAvailableActiveAccount: () => undefined,
 			activateBestAccount: async () => auto,
 			ensureValidToken: async () => "auto-token",
 			handleQuotaExceeded: async () => {},
@@ -437,6 +492,7 @@ describe("manual account selection", () => {
 			clearManualAccount: () => {
 				cleared = true;
 			},
+			getAvailableActiveAccount: () => undefined,
 			activateBestAccount: async () => {
 				activateCount += 1;
 				return auto;
@@ -500,6 +556,8 @@ describe("manual account selection", () => {
 			getAvailableManualAccount: () => undefined,
 			hasManualAccount: () => false,
 			clearManualAccount: () => {},
+			getAvailableActiveAccount: (options?: { excludeEmails?: Set<string> }) =>
+				options?.excludeEmails?.has(broken.email) ? undefined : broken,
 			activateBestAccount: async (options?: {
 				excludeEmails?: Set<string>;
 			}) => {
@@ -546,7 +604,7 @@ describe("manual account selection", () => {
 			events.push(event as { type?: string });
 		}
 
-		expect(activateCount).toBe(2);
+		expect(activateCount).toBe(1);
 		expect(headers).toEqual(["healthy@example.com"]);
 		expect(events.some((event) => event.type === "error")).toBe(false);
 		expect(notifyRotationSkipForAuthFailure).toHaveBeenCalledWith(

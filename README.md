@@ -4,7 +4,7 @@
 
 MultiCodex is a [pi](https://github.com/badlogic/pi-mono) extension that manages multiple ChatGPT Codex accounts and rotates between them automatically when you hit quota limits.
 
-You add your Codex accounts once. After that, MultiCodex transparently picks the best available account for every request. When one account runs dry mid-session, it switches to another and retries — no manual intervention needed.
+You add your Codex accounts once. After that, MultiCodex picks the best available account at session start and keeps that account sticky to preserve provider prompt-cache affinity. When one account runs dry mid-session, it switches to another and retries — no manual intervention needed.
 
 ## Getting started
 
@@ -25,7 +25,9 @@ When you start a session, MultiCodex:
 1. Imports your existing pi Codex auth automatically (if present).
 2. Merges duplicate imported credentials into the managed pool so one account does not consume multiple rotation slots.
 3. Checks usage data across all managed accounts.
-4. Picks the best available account — untouched accounts first, then the one whose weekly reset window ends soonest, then a random available account as fallback.
+4. Picks the best available account — untouched accounts first, then lowest max 5-hour/weekly usage, then the one whose weekly reset window ends soonest, then a random available account as fallback.
+
+For later requests in the same session, MultiCodex keeps using the active account instead of re-ranking every turn. It only selects another account when the active account becomes unavailable before output starts.
 
 If you pin a specific account from `/multicodex accounts` or `/multicodex use`, that account is used until it hits quota, fails auth validation, or you clear the override.
 

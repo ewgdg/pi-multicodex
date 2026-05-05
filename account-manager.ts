@@ -273,6 +273,18 @@ export class AccountManager {
 		return manual;
 	}
 
+	getAvailableActiveAccount(options?: {
+		excludeEmails?: Set<string>;
+		now?: number;
+	}): Account | undefined {
+		const active = this.getActiveAccount();
+		if (!active) return undefined;
+		const now = options?.now ?? Date.now();
+		if (!isAccountAvailable(active, now)) return undefined;
+		if (options?.excludeEmails?.has(active.email)) return undefined;
+		return active;
+	}
+
 	markExhausted(email: string, until: number): void {
 		const account = this.getAccount(email);
 		if (account) {
