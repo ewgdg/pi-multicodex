@@ -15,7 +15,7 @@ async function refreshAndActivateBestAccount(
 		if (needsReauth.length > 0) {
 			const hints = needsReauth.map((a) => {
 				const cmd = accountManager.isPiAuthAccount(a)
-					? "/login openai-codex"
+					? "/login → Use a subscription → ChatGPT Plus/Pro Codex"
 					: `/multicodex use ${a.email}`;
 				return `${a.email} (${cmd})`;
 			});

@@ -1,7 +1,7 @@
 import {
 	type OAuthCredentials,
 	refreshOpenAICodexToken,
-} from "@mariozechner/pi-ai/oauth";
+} from "@earendil-works/pi-ai/oauth";
 import { normalizeUnknownError } from "pi-provider-utils/streams";
 import { loadImportedOpenAICodexAuth } from "./auth";
 import { isAccountAvailable, pickBestAccount } from "./selection";
@@ -20,6 +20,9 @@ const QUOTA_COOLDOWN_MS = 60 * 60 * 1000;
 
 type WarningHandler = (message: string) => void;
 type StateChangeHandler = () => void;
+
+const CODEX_SUBSCRIPTION_LOGIN_HINT =
+	"/login → Use a subscription → ChatGPT Plus/Pro Codex";
 
 export class AccountManager {
 	private data: StorageData;
@@ -104,7 +107,7 @@ export class AccountManager {
 		}
 		this.warnedAuthFailureEmails.add(account.email);
 		const hint = this.isPiAuthAccount(account)
-			? "/login openai-codex"
+			? CODEX_SUBSCRIPTION_LOGIN_HINT
 			: `/multicodex reauth ${account.email}`;
 		this.warningHandler?.(
 			`Multicodex skipped ${account.email} during rotation: ${normalizeUnknownError(error)}. Account is flagged in /multicodex accounts. Run ${hint} to repair it.`,
@@ -469,7 +472,7 @@ export class AccountManager {
 	async ensureValidToken(account: Account): Promise<string> {
 		if (account.needsReauth) {
 			const hint = this.isPiAuthAccount(account)
-				? "/login openai-codex"
+				? CODEX_SUBSCRIPTION_LOGIN_HINT
 				: `/multicodex use ${account.email}`;
 			throw new Error(
 				`${account.email}: re-authentication required — run ${hint}`,
@@ -539,7 +542,7 @@ export class AccountManager {
 		this.piAuthAccount = undefined;
 		this.notifyStateChanged();
 		throw new Error(
-			`${account.email}: pi auth expired — run /login openai-codex`,
+			`${account.email}: pi auth expired — run ${CODEX_SUBSCRIPTION_LOGIN_HINT}`,
 		);
 	}
 }

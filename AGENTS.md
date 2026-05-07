@@ -87,13 +87,13 @@ When continuing work, prioritize these items before expanding scope:
 ## Packaging rules
 
 - Core pi packages must stay aligned with pi package docs.
-- Keep `@mariozechner/pi-ai`, `@mariozechner/pi-coding-agent`, and `@mariozechner/pi-tui` in `peerDependencies` and `devDependencies` as needed for local development.
+- Keep `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, and `@earendil-works/pi-tui` in `peerDependencies` and `devDependencies` as needed for local development.
 - Do not move pi core packages into normal runtime `dependencies` unless pi package docs require it.
 - Keep the published tarball limited to runtime files only.
 
 ## Type safety and architecture
 
-- Use public exports from `@mariozechner/pi-ai` and `@mariozechner/pi-coding-agent`.
+- Use public exports from `@earendil-works/pi-ai` and `@earendil-works/pi-coding-agent`.
 - Prefer small focused modules with explicit exports over large shared files.
 - Keep durable config, runtime status, and UI wiring separate.
 - Normalize config on load and save.

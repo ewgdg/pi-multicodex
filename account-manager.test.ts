@@ -22,7 +22,7 @@ vi.mock("./auth", () => ({
 	loadImportedOpenAICodexAuth: mocks.loadImportedOpenAICodexAuth,
 }));
 
-vi.mock("@mariozechner/pi-ai/oauth", () => ({
+vi.mock("@earendil-works/pi-ai/oauth", () => ({
 	refreshOpenAICodexToken: vi.fn(),
 }));
 
@@ -281,7 +281,7 @@ describe("AccountManager auth-failure warnings", () => {
 		expect(warningHandler).toHaveBeenCalledTimes(3);
 	});
 
-	it("uses /login hint for ephemeral pi auth account", async () => {
+	it("uses subscription login hint for ephemeral pi auth account", async () => {
 		mocks.loadImportedOpenAICodexAuth.mockResolvedValue({
 			identifier: "pi@example.com",
 			fingerprint: "fp",
@@ -304,7 +304,9 @@ describe("AccountManager auth-failure warnings", () => {
 		manager.notifyRotationSkipForAuthFailure(piAccount, new Error("expired"));
 
 		expect(warningHandler).toHaveBeenCalledTimes(1);
-		expect(warningHandler.mock.calls[0]?.[0]).toContain("/login openai-codex");
+		expect(warningHandler.mock.calls[0]?.[0]).toContain(
+			"/login → Use a subscription → ChatGPT Plus/Pro Codex",
+		);
 	});
 });
 

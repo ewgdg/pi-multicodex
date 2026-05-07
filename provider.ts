@@ -1,5 +1,5 @@
-import { getApiProvider, getModels } from "@mariozechner/pi-ai";
-import type { ProviderModelConfig } from "@mariozechner/pi-coding-agent";
+import { getApiProvider, getModels } from "@earendil-works/pi-ai";
+import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { AccountManager } from "./account-manager";
 import { createStreamWrapper } from "./stream-wrapper";
 
