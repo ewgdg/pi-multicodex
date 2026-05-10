@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { handleNewSessionSwitch, handleSessionStart } from "./hooks";
 
 describe("handleSessionStart", () => {
-	it("does nothing when no accounts exist", () => {
-		const loadPiAuth = vi.fn();
+	it("loads pi auth but does nothing else when no accounts exist", async () => {
+		const loadPiAuth = vi.fn().mockResolvedValue(undefined);
 		const refreshUsageForAllAccounts = vi.fn();
 		const getAvailableManualAccount = vi.fn();
 		const hasManualAccount = vi.fn();
@@ -24,12 +24,56 @@ describe("handleSessionStart", () => {
 			markReady,
 		} as never);
 
-		expect(loadPiAuth).not.toHaveBeenCalled();
-		expect(refreshUsageForAllAccounts).not.toHaveBeenCalled();
-		expect(getAvailableManualAccount).not.toHaveBeenCalled();
-		expect(hasManualAccount).not.toHaveBeenCalled();
-		expect(clearManualAccount).not.toHaveBeenCalled();
-		expect(activateBestAccount).not.toHaveBeenCalled();
+		await vi.waitFor(() => {
+			expect(beginInitialization).toHaveBeenCalled();
+			expect(loadPiAuth).toHaveBeenCalled();
+			expect(refreshUsageForAllAccounts).not.toHaveBeenCalled();
+			expect(getAvailableManualAccount).not.toHaveBeenCalled();
+			expect(hasManualAccount).not.toHaveBeenCalled();
+			expect(clearManualAccount).not.toHaveBeenCalled();
+			expect(activateBestAccount).not.toHaveBeenCalled();
+			expect(markReady).toHaveBeenCalled();
+		});
+	});
+
+	it("loads and activates pi auth when managed storage is empty", async () => {
+		const piAuthAccount = { email: "OpenAI Codex account" };
+		let piAuthLoaded = false;
+		const loadPiAuth = vi.fn().mockImplementation(async () => {
+			piAuthLoaded = true;
+		});
+		const refreshUsageForAllAccounts = vi.fn().mockResolvedValue(undefined);
+		const getAvailableManualAccount = vi.fn().mockReturnValue(undefined);
+		const hasManualAccount = vi.fn().mockReturnValue(false);
+		const clearManualAccount = vi.fn();
+		const activateBestAccount = vi.fn().mockResolvedValue(piAuthAccount);
+		const beginInitialization = vi.fn();
+		const markReady = vi.fn();
+
+		handleSessionStart({
+			getAccounts: () => (piAuthLoaded ? [piAuthAccount] : []),
+			loadPiAuth,
+			isPiAuthAccount: () => true,
+			refreshUsageForAllAccounts,
+			getAccountsNeedingReauth: () => [],
+			getAvailableManualAccount,
+			hasManualAccount,
+			clearManualAccount,
+			activateBestAccount,
+			beginInitialization,
+			markReady,
+		} as never);
+
+		await vi.waitFor(() => {
+			expect(beginInitialization).toHaveBeenCalled();
+			expect(loadPiAuth).toHaveBeenCalled();
+			expect(refreshUsageForAllAccounts).toHaveBeenCalledWith({ force: true });
+			expect(getAvailableManualAccount).toHaveBeenCalled();
+			expect(hasManualAccount).toHaveBeenCalled();
+			expect(clearManualAccount).not.toHaveBeenCalled();
+			expect(activateBestAccount).toHaveBeenCalled();
+			expect(markReady).toHaveBeenCalled();
+		});
 	});
 
 	it("refreshes and activates when accounts exist and no manual account is available", async () => {
@@ -119,6 +163,7 @@ describe("handleNewSessionSwitch", () => {
 		const markReady = vi.fn();
 
 		handleNewSessionSwitch({
+			getAccounts: () => [{ email: "a@example.com" }],
 			loadPiAuth,
 			isPiAuthAccount: () => false,
 			refreshUsageForAllAccounts,

@@ -9,6 +9,9 @@ async function refreshAndActivateBestAccount(
 	accountManager.beginInitialization();
 	try {
 		await accountManager.loadPiAuth();
+		// Pi auth is ephemeral, so it only appears after loadPiAuth runs.
+		if (accountManager.getAccounts().length === 0) return;
+
 		await accountManager.refreshUsageForAllAccounts({ force: true });
 
 		const needsReauth = accountManager.getAccountsNeedingReauth();
@@ -39,7 +42,6 @@ export function handleSessionStart(
 	accountManager: AccountManager,
 	warningHandler?: WarningHandler,
 ): void {
-	if (accountManager.getAccounts().length === 0) return;
 	refreshAndActivateBestAccount(accountManager, warningHandler).catch(() => {});
 }
 
