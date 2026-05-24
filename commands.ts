@@ -388,7 +388,7 @@ async function openAccountManagementPanel(
 			if (text === "quota") {
 				return theme.fg("warning", `[${text}]`);
 			}
-			if (text === "pi auth" || text === "pi auth only") {
+			if (text === "pi auth") {
 				return theme.fg("success", `[${text}]`);
 			}
 			return theme.fg("muted", `[${text}]`);
@@ -731,7 +731,7 @@ async function runRotationSubcommand(
 		"Per request, MultiCodex keeps the active account to preserve provider prompt cache affinity.",
 		"If token validation fails before a request starts, MultiCodex skips that account and retries another one.",
 		"If a request hits quota or rate limit before any output streams, MultiCodex marks the account on cooldown and retries.",
-		"If pi auth is active, it participates in rotation as an ephemeral account without being persisted.",
+		"Pi login accounts are imported into the same managed pool and rotate like any other account.",
 	];
 
 	ctx.ui.notify(lines.join("\n"), "info");
@@ -756,9 +756,6 @@ async function runVerifySubcommand(
 	const storageWritable = await isWritableDirectoryFor(STORAGE_FILE);
 	const settingsWritable = await isWritableDirectoryFor(SETTINGS_FILE);
 	await statusController.loadPreferences(ctx);
-	const hasPiAuth = accountManager
-		.getAccounts()
-		.some((a) => accountManager.isPiAuthAccount(a));
 	const accounts = accountManager.getAccounts().length;
 	const active = accountManager.getActiveAccount()?.email ?? "none";
 	const needsReauth = accountManager.getAccountsNeedingReauth().length;
@@ -766,7 +763,7 @@ async function runVerifySubcommand(
 
 	if (!ctx.hasUI) {
 		ctx.ui.notify(
-			`verify: ${ok ? "PASS" : "WARN"} storage=${storageWritable ? "ok" : "fail"} settings=${settingsWritable ? "ok" : "fail"} accounts=${accounts} active=${active} piAuth=${hasPiAuth ? "loaded" : "none"} needsReauth=${needsReauth}`,
+			`verify: ${ok ? "PASS" : "WARN"} storage=${storageWritable ? "ok" : "fail"} settings=${settingsWritable ? "ok" : "fail"} accounts=${accounts} active=${active} needsReauth=${needsReauth}`,
 			ok ? "info" : "warning",
 		);
 		return;
@@ -777,7 +774,7 @@ async function runVerifySubcommand(
 		`settings directory writable: ${settingsWritable ? "yes" : "no"}`,
 		`managed accounts: ${accounts}`,
 		`active account: ${active}`,
-		`pi auth (ephemeral): ${hasPiAuth ? "loaded" : "none"}`,
+		"pi login auth: imported into managed accounts when present",
 		`accounts needing re-authentication: ${needsReauth}`,
 	];
 	await ctx.ui.select(`MultiCodex Verify (${ok ? "PASS" : "WARN"})`, lines);

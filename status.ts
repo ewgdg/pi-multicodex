@@ -371,13 +371,19 @@ export function createUsageStatusController(accountManager: AccountManager) {
 	let refreshTimer: ReturnType<typeof setInterval> | undefined;
 	let modelSelectTimer: ReturnType<typeof setTimeout> | undefined;
 	let activeContext: ExtensionContext | undefined;
+	let isRunning = true;
+	let lifecycleVersion = 0;
 	let refreshInFlight = false;
 	let queuedRefresh = false;
 	let preferences: FooterPreferences = DEFAULT_PREFERENCES;
 	let livePreviewPreferences: FooterPreferences | undefined;
 
+	function isCurrentContext(ctx: ExtensionContext, version: number): boolean {
+		return isRunning && activeContext === ctx && lifecycleVersion === version;
+	}
+
 	accountManager.onStateChange(() => {
-		if (!activeContext) return;
+		if (!activeContext || !isRunning) return;
 		renderCachedStatus(activeContext, livePreviewPreferences ?? preferences);
 	});
 
@@ -425,7 +431,11 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		}
 	}
 
-	async function updateStatus(ctx: ExtensionContext): Promise<void> {
+	async function updateStatus(
+		ctx: ExtensionContext,
+		version: number,
+	): Promise<void> {
+		if (!isCurrentContext(ctx, version)) return;
 		if (!ctx.hasUI) return;
 		if (!isManagedModel(ctx.model)) {
 			clearStatus(ctx);
@@ -447,6 +457,7 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		const usage =
 			(await accountManager.refreshUsageForAccount(activeAccount)) ??
 			cachedUsage;
+		if (!isCurrentContext(ctx, version)) return;
 		ctx.ui.setStatus(
 			STATUS_KEY,
 			formatActiveAccountStatus(
@@ -459,7 +470,9 @@ export function createUsageStatusController(accountManager: AccountManager) {
 	}
 
 	async function refreshFor(ctx: ExtensionContext): Promise<void> {
+		if (!isRunning) return;
 		activeContext = ctx;
+		const version = lifecycleVersion;
 		if (refreshInFlight) {
 			queuedRefresh = true;
 			return;
@@ -467,39 +480,48 @@ export function createUsageStatusController(accountManager: AccountManager) {
 
 		refreshInFlight = true;
 		try {
-			await updateStatus(ctx);
+			await updateStatus(ctx, version);
 		} finally {
 			refreshInFlight = false;
-			if (queuedRefresh && activeContext) {
+			if (queuedRefresh) {
 				queuedRefresh = false;
-				await refreshFor(activeContext);
+				if (activeContext && isCurrentContext(ctx, version)) {
+					await refreshFor(activeContext);
+				}
 			}
 		}
 	}
 
 	function scheduleModelSelectRefresh(ctx: ExtensionContext): void {
+		if (!isRunning) return;
 		activeContext = ctx;
+		const version = lifecycleVersion;
 		renderCachedStatus(ctx, livePreviewPreferences ?? preferences);
 		if (modelSelectTimer) {
 			clearTimeout(modelSelectTimer);
 		}
 		modelSelectTimer = setTimeout(() => {
 			modelSelectTimer = undefined;
+			if (!isCurrentContext(ctx, version)) return;
 			void refreshFor(ctx);
 		}, MODEL_SELECT_REFRESH_DEBOUNCE_MS);
 		modelSelectTimer.unref?.();
 	}
 
 	function startAutoRefresh(): void {
+		isRunning = true;
+		lifecycleVersion += 1;
 		if (refreshTimer) clearInterval(refreshTimer);
 		refreshTimer = setInterval(() => {
-			if (!activeContext) return;
+			if (!activeContext || !isRunning) return;
 			void refreshFor(activeContext);
 		}, REFRESH_INTERVAL_MS);
 		refreshTimer.unref?.();
 	}
 
 	function stopAutoRefresh(ctx?: ExtensionContext): void {
+		isRunning = false;
+		lifecycleVersion += 1;
 		if (refreshTimer) {
 			clearInterval(refreshTimer);
 			refreshTimer = undefined;
@@ -515,14 +537,20 @@ export function createUsageStatusController(accountManager: AccountManager) {
 	}
 
 	async function loadPreferences(ctx?: ExtensionContext): Promise<void> {
+		const version = lifecycleVersion;
 		try {
 			await ensurePreferencesLoaded();
 		} catch (error) {
 			preferences = DEFAULT_PREFERENCES;
-			ctx?.ui.notify(
-				`Multicodex: failed to load ${SETTINGS_FILE}: ${String(error)}`,
-				"warning",
-			);
+			if (
+				!ctx ||
+				(isRunning && (!activeContext || isCurrentContext(ctx, version)))
+			) {
+				ctx?.ui.notify(
+					`Multicodex: failed to load ${SETTINGS_FILE}: ${String(error)}`,
+					"warning",
+				);
+			}
 		}
 	}
 

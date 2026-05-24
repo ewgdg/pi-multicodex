@@ -87,6 +87,70 @@ describe("multicodexExtension", () => {
 		expect(handlers.has("session_shutdown")).toBe(true);
 	});
 
+	it("keeps warning notification failures from escaping", () => {
+		const handlers = new Map<string, (...args: unknown[]) => void>();
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		const ctx = {
+			ui: {
+				notify: vi.fn(() => {
+					throw new Error("stale ctx");
+				}),
+			},
+		};
+
+		try {
+			multicodexExtension({
+				registerProvider: vi.fn(),
+				on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+					handlers.set(event, handler);
+				}),
+			} as never);
+
+			handlers.get("session_start")?.({ reason: "resume" }, ctx as never);
+			const accountWarning = mocks.setWarningHandler.mock.calls[0]?.[0] as
+				| ((message: string) => void)
+				| undefined;
+
+			expect(() => accountWarning?.("warning")).not.toThrow();
+			expect(warn).toHaveBeenCalledWith(
+				"[multicodex] Failed to show warning:",
+				expect.any(Error),
+			);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("drops async warnings after session shutdown", () => {
+		const handlers = new Map<string, (...args: unknown[]) => void>();
+		const ctx = { ui: { notify: vi.fn() } };
+
+		multicodexExtension({
+			registerProvider: vi.fn(),
+			on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+				handlers.set(event, handler);
+			}),
+		} as never);
+
+		handlers.get("session_start")?.({ reason: "resume" }, ctx as never);
+		const sessionStartWarning = mocks.handleSessionStart.mock.calls[0]?.[1] as
+			| ((message: string) => void)
+			| undefined;
+		const accountWarning = mocks.setWarningHandler.mock.calls[0]?.[0] as
+			| ((message: string) => void)
+			| undefined;
+
+		sessionStartWarning?.("active hook warning");
+		accountWarning?.("active account warning");
+		expect(ctx.ui.notify).toHaveBeenCalledTimes(2);
+
+		handlers.get("session_shutdown")?.({}, ctx as never);
+		sessionStartWarning?.("stale hook warning");
+		accountWarning?.("stale account warning");
+
+		expect(ctx.ui.notify).toHaveBeenCalledTimes(2);
+	});
+
 	it("routes session and status events to the helpers", async () => {
 		const handlers = new Map<string, (...args: unknown[]) => void>();
 		const ctx = { ui: { notify: vi.fn() } };

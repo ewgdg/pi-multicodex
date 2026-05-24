@@ -28,7 +28,7 @@ vi.mock("@earendil-works/pi-ai/oauth", () => ({
 
 import { AccountManager } from "./account-manager";
 
-describe("AccountManager ephemeral pi auth", () => {
+describe("AccountManager pi auth import", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		mocks.storageData.accounts = [];
@@ -36,7 +36,7 @@ describe("AccountManager ephemeral pi auth", () => {
 		mocks.loadImportedOpenAICodexAuth.mockResolvedValue(undefined);
 	});
 
-	it("loads pi auth as ephemeral account when no managed account matches", async () => {
+	it("imports pi auth into the managed account pool", async () => {
 		mocks.loadImportedOpenAICodexAuth.mockResolvedValue({
 			identifier: "pi@example.com",
 			fingerprint: "fp",
@@ -56,13 +56,16 @@ describe("AccountManager ephemeral pi auth", () => {
 		expect(account).toMatchObject({
 			email: "pi@example.com",
 			accessToken: "pi-access",
+			refreshToken: "pi-refresh",
+			accountId: "pi-acc",
+			piAuth: true,
 		});
-		const isPi = account ? manager.isPiAuthAccount(account) : false;
-		expect(isPi).toBe(true);
-		expect(mocks.saveStorage).not.toHaveBeenCalled();
+		expect(account ? manager.isPiAuthAccount(account) : false).toBe(true);
+		expect(manager.getActiveAccount()?.email).toBe("pi@example.com");
+		expect(mocks.saveStorage).toHaveBeenCalled();
 	});
 
-	it("creates ephemeral even if refresh token matches a managed account with different email", async () => {
+	it("creates a normal managed account even if refresh token matches a different email", async () => {
 		mocks.storageData.accounts = [
 			{
 				email: "managed@example.com",
@@ -86,19 +89,21 @@ describe("AccountManager ephemeral pi auth", () => {
 		const manager = new AccountManager();
 		await manager.loadPiAuth();
 
-		// Different emails = different accounts, even if same refresh token
+		// Different emails = different accounts, even if same refresh token.
 		expect(manager.getAccounts()).toHaveLength(2);
 		expect(manager.getAccount("managed@example.com")).toBeDefined();
-		expect(manager.getAccount("pi@example.com")).toBeDefined();
+		expect(manager.getAccount("pi@example.com")).toMatchObject({
+			piAuth: true,
+		});
 	});
 
-	it("skips ephemeral when managed account has the same email", async () => {
+	it("updates an existing managed account with the same email", async () => {
 		mocks.storageData.accounts = [
 			{
 				email: "pi@example.com",
 				accessToken: "managed-access",
 				refreshToken: "managed-refresh",
-				expiresAt: Date.now() + 3600_000,
+				expiresAt: 100,
 			},
 		];
 		mocks.loadImportedOpenAICodexAuth.mockResolvedValue({
@@ -107,7 +112,7 @@ describe("AccountManager ephemeral pi auth", () => {
 			credentials: {
 				access: "pi-access",
 				refresh: "different-refresh",
-				expires: Date.now() + 3600_000,
+				expires: 200,
 			},
 		});
 
@@ -115,58 +120,32 @@ describe("AccountManager ephemeral pi auth", () => {
 		await manager.loadPiAuth();
 
 		expect(manager.getAccounts()).toHaveLength(1);
-		const first = manager.getAccounts()[0];
-		expect(first ? manager.isPiAuthAccount(first) : true).toBe(false);
-	});
-
-	it("does not persist ephemeral account when saving", async () => {
-		mocks.loadImportedOpenAICodexAuth.mockResolvedValue({
-			identifier: "pi@example.com",
-			fingerprint: "fp",
-			credentials: {
-				access: "pi-access",
-				refresh: "pi-refresh",
-				expires: Date.now() + 3600_000,
-			},
+		expect(manager.getAccount("pi@example.com")).toMatchObject({
+			accessToken: "pi-access",
+			refreshToken: "different-refresh",
+			expiresAt: 200,
+			piAuth: true,
 		});
-
-		const manager = new AccountManager();
-		await manager.loadPiAuth();
-
-		manager.addOrUpdateAccount("new@example.com", {
-			access: "new-access",
-			refresh: "new-refresh",
-			expires: Date.now() + 3600_000,
-		});
-
 		expect(mocks.saveStorage).toHaveBeenCalled();
-		const savedData = mocks.saveStorage.mock.calls[0]?.[0] as {
-			accounts: Array<{ email: string }>;
-		};
-		const savedEmails = savedData.accounts.map((a) => a.email);
-		expect(savedEmails).toContain("new@example.com");
-		expect(savedEmails).not.toContain("pi@example.com");
 	});
 
-	it("clears ephemeral when auth.json has no codex entry", async () => {
-		mocks.loadImportedOpenAICodexAuth
-			.mockResolvedValueOnce({
-				identifier: "pi@example.com",
-				fingerprint: "fp",
-				credentials: {
-					access: "pi-access",
-					refresh: "pi-refresh",
-					expires: Date.now() + 3600_000,
-				},
-			})
-			.mockResolvedValueOnce(undefined);
+	it("leaves managed accounts untouched when auth.json has no codex entry", async () => {
+		mocks.storageData.accounts = [
+			{
+				email: "managed@example.com",
+				accessToken: "managed-access",
+				refreshToken: "managed-refresh",
+				expiresAt: Date.now() + 3600_000,
+			},
+		];
+		mocks.loadImportedOpenAICodexAuth.mockResolvedValue(undefined);
 
 		const manager = new AccountManager();
 		await manager.loadPiAuth();
-		expect(manager.getAccounts()).toHaveLength(1);
 
-		await manager.loadPiAuth();
-		expect(manager.getAccounts()).toHaveLength(0);
+		expect(manager.getAccounts()).toHaveLength(1);
+		expect(manager.getAccount("managed@example.com")).toBeDefined();
+		expect(mocks.saveStorage).not.toHaveBeenCalled();
 	});
 });
 
@@ -281,7 +260,7 @@ describe("AccountManager auth-failure warnings", () => {
 		expect(warningHandler).toHaveBeenCalledTimes(3);
 	});
 
-	it("uses subscription login hint for ephemeral pi auth account", async () => {
+	it("uses the normal multicodex reauth hint for imported pi auth", async () => {
 		mocks.loadImportedOpenAICodexAuth.mockResolvedValue({
 			identifier: "pi@example.com",
 			fingerprint: "fp",
@@ -305,12 +284,12 @@ describe("AccountManager auth-failure warnings", () => {
 
 		expect(warningHandler).toHaveBeenCalledTimes(1);
 		expect(warningHandler.mock.calls[0]?.[0]).toContain(
-			"/login → Use a subscription → ChatGPT Plus/Pro Codex",
+			"/multicodex reauth pi@example.com",
 		);
 	});
 });
 
-describe("AccountManager pi auth exhaustion handling", () => {
+describe("AccountManager imported pi auth exhaustion handling", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		mocks.storageData.accounts = [];
@@ -318,7 +297,7 @@ describe("AccountManager pi auth exhaustion handling", () => {
 		mocks.loadImportedOpenAICodexAuth.mockResolvedValue(undefined);
 	});
 
-	it("clears expired exhaustion on ephemeral pi auth account", async () => {
+	it("persists quota exhaustion on imported pi auth account", async () => {
 		mocks.loadImportedOpenAICodexAuth.mockResolvedValue({
 			identifier: "pi@example.com",
 			fingerprint: "fp",
@@ -336,15 +315,13 @@ describe("AccountManager pi auth exhaustion handling", () => {
 		expect(piAccount).toBeDefined();
 		if (!piAccount) return;
 
-		// Mark exhausted until 1s from now
+		mocks.saveStorage.mockClear();
 		manager.markExhausted("pi@example.com", Date.now() + 1000);
 		expect(piAccount.quotaExhaustedUntil).toBeGreaterThan(0);
-
-		// markExhausted should not persist for pi auth
-		expect(mocks.saveStorage).not.toHaveBeenCalled();
+		expect(mocks.saveStorage).toHaveBeenCalled();
 	});
 
-	it("clearAllQuotaExhaustion clears pi auth account too", async () => {
+	it("clearAllQuotaExhaustion clears imported pi auth like other accounts", async () => {
 		mocks.storageData.accounts = [
 			{
 				email: "managed@example.com",
@@ -367,7 +344,6 @@ describe("AccountManager pi auth exhaustion handling", () => {
 		const manager = new AccountManager();
 		await manager.loadPiAuth();
 
-		// Exhaust the pi auth account
 		manager.markExhausted("pi@example.com", Date.now() + 60_000);
 
 		const cleared = manager.clearAllQuotaExhaustion();

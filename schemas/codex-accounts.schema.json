@@ -66,6 +66,10 @@
 				"needsReauth": {
 					"description": "Account needs re-authentication",
 					"type": "boolean"
+				},
+				"piAuth": {
+					"description": "Account was imported from pi login auth",
+					"type": "boolean"
 				}
 			},
 			"required": ["email", "accessToken", "refreshToken", "expiresAt"],

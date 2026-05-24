@@ -2,58 +2,23 @@ import { describe, expect, it, vi } from "vitest";
 import { handleNewSessionSwitch, handleSessionStart } from "./hooks";
 
 describe("handleSessionStart", () => {
-	it("loads pi auth but does nothing else when no accounts exist", async () => {
+	it("loads pi auth and activates even when no managed accounts exist", async () => {
 		const loadPiAuth = vi.fn().mockResolvedValue(undefined);
-		const refreshUsageForAllAccounts = vi.fn();
-		const getAvailableManualAccount = vi.fn();
-		const hasManualAccount = vi.fn();
-		const clearManualAccount = vi.fn();
-		const activateBestAccount = vi.fn();
-		const beginInitialization = vi.fn();
-		const markReady = vi.fn();
-
-		handleSessionStart({
-			getAccounts: () => [],
-			loadPiAuth,
-			refreshUsageForAllAccounts,
-			getAvailableManualAccount,
-			hasManualAccount,
-			clearManualAccount,
-			activateBestAccount,
-			beginInitialization,
-			markReady,
-		} as never);
-
-		await vi.waitFor(() => {
-			expect(beginInitialization).toHaveBeenCalled();
-			expect(loadPiAuth).toHaveBeenCalled();
-			expect(refreshUsageForAllAccounts).not.toHaveBeenCalled();
-			expect(getAvailableManualAccount).not.toHaveBeenCalled();
-			expect(hasManualAccount).not.toHaveBeenCalled();
-			expect(clearManualAccount).not.toHaveBeenCalled();
-			expect(activateBestAccount).not.toHaveBeenCalled();
-			expect(markReady).toHaveBeenCalled();
-		});
-	});
-
-	it("loads and activates pi auth when managed storage is empty", async () => {
-		const piAuthAccount = { email: "OpenAI Codex account" };
-		let piAuthLoaded = false;
-		const loadPiAuth = vi.fn().mockImplementation(async () => {
-			piAuthLoaded = true;
-		});
 		const refreshUsageForAllAccounts = vi.fn().mockResolvedValue(undefined);
 		const getAvailableManualAccount = vi.fn().mockReturnValue(undefined);
 		const hasManualAccount = vi.fn().mockReturnValue(false);
 		const clearManualAccount = vi.fn();
-		const activateBestAccount = vi.fn().mockResolvedValue(piAuthAccount);
+		const activateBestAccount = vi.fn().mockResolvedValue(undefined);
 		const beginInitialization = vi.fn();
 		const markReady = vi.fn();
+		let piAuthLoaded = false;
+		loadPiAuth.mockImplementation(async () => {
+			piAuthLoaded = true;
+		});
 
 		handleSessionStart({
-			getAccounts: () => (piAuthLoaded ? [piAuthAccount] : []),
+			getAccounts: () => (piAuthLoaded ? [{ email: "pi@example.com" }] : []),
 			loadPiAuth,
-			isPiAuthAccount: () => true,
 			refreshUsageForAllAccounts,
 			getAccountsNeedingReauth: () => [],
 			getAvailableManualAccount,
@@ -89,7 +54,6 @@ describe("handleSessionStart", () => {
 		handleSessionStart({
 			getAccounts: () => [{ email: "a@example.com" }],
 			loadPiAuth,
-			isPiAuthAccount: () => false,
 			refreshUsageForAllAccounts,
 			getAccountsNeedingReauth: () => [],
 			getAvailableManualAccount,
@@ -127,7 +91,6 @@ describe("handleSessionStart", () => {
 		handleSessionStart({
 			getAccounts: () => [{ email: "manual@example.com" }],
 			loadPiAuth,
-			isPiAuthAccount: () => false,
 			refreshUsageForAllAccounts,
 			getAccountsNeedingReauth: () => [],
 			getAvailableManualAccount,
@@ -165,7 +128,6 @@ describe("handleNewSessionSwitch", () => {
 		handleNewSessionSwitch({
 			getAccounts: () => [{ email: "a@example.com" }],
 			loadPiAuth,
-			isPiAuthAccount: () => false,
 			refreshUsageForAllAccounts,
 			getAccountsNeedingReauth: () => [],
 			getAvailableManualAccount,
@@ -195,7 +157,6 @@ describe("handleNewSessionSwitch", () => {
 
 		handleNewSessionSwitch({
 			loadPiAuth,
-			isPiAuthAccount: () => false,
 			refreshUsageForAllAccounts: vi.fn(),
 			getAccountsNeedingReauth: () => [],
 			getAvailableManualAccount: vi.fn(),

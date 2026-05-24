@@ -39,6 +39,10 @@ const AccountSchema = z
 			.boolean()
 			.optional()
 			.meta({ description: "Account needs re-authentication" }),
+		piAuth: z
+			.boolean()
+			.optional()
+			.meta({ description: "Account was imported from pi login auth" }),
 	})
 	.meta({ id: "Account", description: "A managed OpenAI Codex account" });
 

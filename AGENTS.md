@@ -44,7 +44,7 @@ The current codebase is organized around these responsibilities:
 ## Current product behavior
 
 - MultiCodex owns the normal `openai-codex` provider path directly.
-- pi's stored `openai-codex` auth is auto-imported when new or changed.
+- pi's stored `openai-codex` auth is auto-imported into the same managed account pool as manually added accounts.
 - Current shipped command family is:
   - `/multicodex`
   - `/multicodex show`

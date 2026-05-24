@@ -22,10 +22,9 @@ To manage your accounts inside a session, type `/multicodex`.
 
 When you start a session, MultiCodex:
 
-1. Imports your existing pi Codex auth automatically (if present).
-2. Merges duplicate imported credentials into the managed pool so one account does not consume multiple rotation slots.
-3. Checks usage data across all managed accounts.
-4. Picks the best available account — untouched accounts first, then lowest max 5-hour/weekly usage, then the one whose weekly reset window ends soonest, then a random available account as fallback.
+1. Imports your existing pi Codex auth automatically (if present) into the managed account pool.
+2. Checks usage data across all managed accounts, including the imported pi login account.
+3. Picks the best available account — untouched accounts first, then lowest max 5-hour/weekly usage, then the one whose weekly reset window ends soonest, then a random available account as fallback.
 
 For later requests in the same session, MultiCodex keeps using the active account instead of re-ranking every turn. It only selects another account when the active account becomes unavailable before output starts.
 
@@ -68,7 +67,7 @@ The `/multicodex accounts` panel merges the old `show` and `use` flows into one 
 - **n** starts login for a new managed account.
 - **backspace** removes the selected account after confirmation.
 
-Each row shows the account identifier, active/manual state, reauth state, quota state, linked imported auth state, and cached 5-hour and weekly usage windows.
+Each row shows the account identifier, active/manual state, pi-auth origin, reauth state, quota state, and cached 5-hour and weekly usage windows.
 
 When you remove an active account, MultiCodex switches to the next available one automatically.
 
@@ -85,7 +84,7 @@ You can customize which fields appear and their ordering with `/multicodex foote
 ## What it does under the hood
 
 - **Provider override.** MultiCodex registers itself as the `openai-codex` provider. You do not need to select a different provider or change your model — it works with whatever Codex model you already use.
-- **Auth import.** When pi has stored Codex OAuth credentials, MultiCodex imports them automatically and merges duplicate credentials into existing managed accounts when possible.
+- **Auth import.** When pi has stored Codex OAuth credentials, MultiCodex imports them automatically into the same managed account pool used by manually added accounts and labels that account as `pi auth` in the UI.
 - **Token refresh.** OAuth tokens are refreshed before expiry so requests do not fail due to stale credentials. You can also force a health refresh with `/multicodex refresh` or re-authenticate explicitly with `/multicodex reauth`.
 - **Usage tracking.** Usage data is fetched from the Codex API and cached for 5 minutes per account. The footer renders cached data immediately and refreshes in the background.
 - **Quota cooldown.** When an account is exhausted, it stays on cooldown until its next known reset time (or 1 hour if the reset time is unknown).

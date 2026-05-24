@@ -291,6 +291,49 @@ describe("createUsageStatusController", () => {
 		expect(refreshUsageForAccount).not.toHaveBeenCalled();
 	});
 
+	it("does not touch a stale context after session shutdown during refresh", async () => {
+		const setStatus = vi.fn();
+		let resolveUsage:
+			| ((value: {
+					primary: { usedPercent: number; resetAt: number };
+					secondary: { usedPercent: number; resetAt: number };
+					fetchedAt: number;
+			  }) => void)
+			| undefined;
+		const refreshUsageForAccount = vi.fn(
+			() =>
+				new Promise<{
+					primary: { usedPercent: number; resetAt: number };
+					secondary: { usedPercent: number; resetAt: number };
+					fetchedAt: number;
+				}>((resolve) => {
+					resolveUsage = resolve;
+				}),
+		);
+		const controller = createUsageStatusController({
+			onStateChange: () => () => undefined,
+			getActiveAccount: () => ({ email: "a@example.com" }),
+			getCachedUsage: vi.fn(),
+			refreshUsageForAccount,
+		} as never);
+		const ctx = createContext({ setStatus });
+
+		const refresh = controller.refreshFor(ctx);
+		await vi.waitFor(() =>
+			expect(refreshUsageForAccount).toHaveBeenCalledOnce(),
+		);
+		controller.stopAutoRefresh(ctx);
+		setStatus.mockClear();
+		resolveUsage?.({
+			primary: { usedPercent: 10, resetAt: 1 },
+			secondary: { usedPercent: 20, resetAt: 2 },
+			fetchedAt: 0,
+		});
+		await refresh;
+
+		expect(setStatus).not.toHaveBeenCalled();
+	});
+
 	it("re-renders from cached state when the account manager reports a state change", async () => {
 		const setStatus = vi.fn();
 		let stateChangeHandler: (() => void) | undefined;

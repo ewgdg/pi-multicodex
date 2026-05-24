@@ -21,12 +21,8 @@ const QUOTA_COOLDOWN_MS = 60 * 60 * 1000;
 type WarningHandler = (message: string) => void;
 type StateChangeHandler = () => void;
 
-const CODEX_SUBSCRIPTION_LOGIN_HINT =
-	"/login → Use a subscription → ChatGPT Plus/Pro Codex";
-
 export class AccountManager {
 	private data: StorageData;
-	private piAuthAccount?: Account;
 	private usageCache = new Map<string, CodexUsageSnapshot>();
 	private refreshPromises = new Map<string, Promise<string>>();
 	private warningHandler?: WarningHandler;
@@ -78,19 +74,15 @@ export class AccountManager {
 	}
 
 	getAccounts(): Account[] {
-		if (this.piAuthAccount) {
-			return [...this.data.accounts, this.piAuthAccount];
-		}
 		return this.data.accounts;
 	}
 
 	getAccount(email: string): Account | undefined {
-		if (this.piAuthAccount?.email === email) return this.piAuthAccount;
 		return this.data.accounts.find((a) => a.email === email);
 	}
 
 	isPiAuthAccount(account: Account): boolean {
-		return this.piAuthAccount !== undefined && account === this.piAuthAccount;
+		return account.piAuth === true;
 	}
 
 	setWarningHandler(handler?: WarningHandler): void {
@@ -106,9 +98,7 @@ export class AccountManager {
 			return;
 		}
 		this.warnedAuthFailureEmails.add(account.email);
-		const hint = this.isPiAuthAccount(account)
-			? CODEX_SUBSCRIPTION_LOGIN_HINT
-			: `/multicodex reauth ${account.email}`;
+		const hint = `/multicodex reauth ${account.email}`;
 		this.warningHandler?.(
 			`Multicodex skipped ${account.email} during rotation: ${normalizeUnknownError(error)}. Account is flagged in /multicodex accounts. Run ${hint} to repair it.`,
 		);
@@ -229,39 +219,22 @@ export class AccountManager {
 	}
 
 	/**
-	 * Read pi's openai-codex auth from auth.json and expose it as a
-	 * memory-only ephemeral account. Never persists to codex-accounts.json.
-	 * If the identity already exists as a managed account, skip it.
+	 * Read pi's openai-codex auth from auth.json and merge it into the
+	 * normal managed account pool so pi-login accounts behave like all others.
 	 */
 	async loadPiAuth(): Promise<void> {
 		const imported = await loadImportedOpenAICodexAuth();
-		if (!imported) {
-			this.piAuthAccount = undefined;
-			this.notifyStateChanged();
-			return;
-		}
+		if (!imported) return;
 
-		const alreadyManaged = this.data.accounts.find(
-			(a) => a.email === imported.identifier,
+		const account = this.addOrUpdateAccount(
+			imported.identifier,
+			imported.credentials,
 		);
-
-		if (alreadyManaged) {
-			this.piAuthAccount = undefined;
+		if (!account.piAuth) {
+			account.piAuth = true;
+			this.save();
 			this.notifyStateChanged();
-			return;
 		}
-
-		this.piAuthAccount = {
-			email: imported.identifier,
-			accessToken: imported.credentials.access,
-			refreshToken: imported.credentials.refresh,
-			expiresAt: imported.credentials.expires,
-			accountId:
-				typeof imported.credentials.accountId === "string"
-					? imported.credentials.accountId
-					: undefined,
-		};
-		this.notifyStateChanged();
 	}
 
 	getAvailableManualAccount(options?: {
@@ -292,29 +265,21 @@ export class AccountManager {
 		const account = this.getAccount(email);
 		if (account) {
 			account.quotaExhaustedUntil = until;
-			if (!this.isPiAuthAccount(account)) {
-				this.save();
-			}
+			this.save();
 			this.notifyStateChanged();
 		}
 	}
 
 	clearAllQuotaExhaustion(): number {
 		let cleared = 0;
-		let managedChanged = false;
 		for (const account of this.getAccounts()) {
 			if (account.quotaExhaustedUntil) {
 				account.quotaExhaustedUntil = undefined;
 				cleared += 1;
-				if (!this.isPiAuthAccount(account)) {
-					managedChanged = true;
-				}
 			}
 		}
-		if (managedChanged) {
-			this.save();
-		}
 		if (cleared > 0) {
+			this.save();
 			this.notifyStateChanged();
 		}
 		return cleared;
@@ -340,9 +305,7 @@ export class AccountManager {
 
 	private markNeedsReauth(account: Account): void {
 		account.needsReauth = true;
-		if (!this.isPiAuthAccount(account)) {
-			this.save();
-		}
+		this.save();
 		this.notifyStateChanged();
 	}
 
@@ -422,14 +385,7 @@ export class AccountManager {
 			now,
 		});
 		if (selected) {
-			if (this.isPiAuthAccount(selected)) {
-				// Don't persist ephemeral pi auth email to disk — it would
-				// become a stale activeEmail after restart.
-				this.data.activeEmail = selected.email;
-				this.notifyStateChanged();
-			} else {
-				this.setActiveAccount(selected.email);
-			}
+			this.setActiveAccount(selected.email);
 		}
 		return selected;
 	}
@@ -450,30 +406,22 @@ export class AccountManager {
 	}
 
 	private clearExpiredExhaustion(now: number): void {
-		let managedChanged = false;
-		let anyChanged = false;
+		let changed = false;
 		for (const account of this.getAccounts()) {
 			if (account.quotaExhaustedUntil && account.quotaExhaustedUntil <= now) {
 				account.quotaExhaustedUntil = undefined;
-				anyChanged = true;
-				if (!this.isPiAuthAccount(account)) {
-					managedChanged = true;
-				}
+				changed = true;
 			}
 		}
-		if (managedChanged) {
+		if (changed) {
 			this.save();
-		}
-		if (anyChanged) {
 			this.notifyStateChanged();
 		}
 	}
 
 	async ensureValidToken(account: Account): Promise<string> {
 		if (account.needsReauth) {
-			const hint = this.isPiAuthAccount(account)
-				? CODEX_SUBSCRIPTION_LOGIN_HINT
-				: `/multicodex use ${account.email}`;
+			const hint = `/multicodex use ${account.email}`;
 			throw new Error(
 				`${account.email}: re-authentication required — run ${hint}`,
 			);
@@ -481,10 +429,6 @@ export class AccountManager {
 
 		if (Date.now() < account.expiresAt - 5 * 60 * 1000) {
 			return account.accessToken;
-		}
-
-		if (this.isPiAuthAccount(account)) {
-			return this.ensureValidTokenForPiAuth(account);
 		}
 
 		const inflight = this.refreshPromises.get(account.email);
@@ -516,33 +460,5 @@ export class AccountManager {
 
 		this.refreshPromises.set(account.email, promise);
 		return promise;
-	}
-
-	/**
-	 * Read-only refresh for the ephemeral pi auth account.
-	 * Re-reads auth.json for fresh tokens. Never writes anything.
-	 */
-	private async ensureValidTokenForPiAuth(account: Account): Promise<string> {
-		const latest = await loadImportedOpenAICodexAuth();
-		if (latest && Date.now() < latest.credentials.expires - 5 * 60 * 1000) {
-			account.accessToken = latest.credentials.access;
-			account.refreshToken = latest.credentials.refresh;
-			account.expiresAt = latest.credentials.expires;
-			const accountId =
-				typeof latest.credentials.accountId === "string"
-					? latest.credentials.accountId
-					: undefined;
-			if (accountId) {
-				account.accountId = accountId;
-			}
-			this.notifyStateChanged();
-			return account.accessToken;
-		}
-
-		this.piAuthAccount = undefined;
-		this.notifyStateChanged();
-		throw new Error(
-			`${account.email}: pi auth expired — run ${CODEX_SUBSCRIPTION_LOGIN_HINT}`,
-		);
 	}
 }

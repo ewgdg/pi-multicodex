@@ -16,12 +16,9 @@ async function refreshAndActivateBestAccount(
 
 		const needsReauth = accountManager.getAccountsNeedingReauth();
 		if (needsReauth.length > 0) {
-			const hints = needsReauth.map((a) => {
-				const cmd = accountManager.isPiAuthAccount(a)
-					? "/login → Use a subscription → ChatGPT Plus/Pro Codex"
-					: `/multicodex use ${a.email}`;
-				return `${a.email} (${cmd})`;
-			});
+			const hints = needsReauth.map(
+				(a) => `${a.email} (/multicodex use ${a.email})`,
+			);
 			warningHandler?.(
 				`Multicodex: ${needsReauth.length} account(s) need re-authentication: ${hints.join(", ")}`,
 			);
