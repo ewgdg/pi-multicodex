@@ -2,16 +2,20 @@ import { createTimeoutController } from "./abort-utils";
 import { type CodexUsageSnapshot, parseCodexUsageResponse } from "./usage";
 
 interface WhamUsageResponse {
+	plan_type?: string;
 	rate_limit?: {
-		primary_window?: {
-			reset_at?: number;
-			used_percent?: number;
-		};
-		secondary_window?: {
-			reset_at?: number;
-			used_percent?: number;
-		};
+		primary_window?: WhamUsageWindow;
+		secondary_window?: WhamUsageWindow;
 	};
+}
+
+interface WhamUsageWindow {
+	allowed?: boolean;
+	limit_reached?: boolean;
+	limit_window_seconds?: number;
+	reset_after_seconds?: number;
+	reset_at?: number;
+	used_percent?: number;
 }
 
 export async function fetchCodexUsage(

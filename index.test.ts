@@ -7,9 +7,12 @@ import {
 	createStreamWrapper,
 	getNextResetAt,
 	getOpenAICodexMirror,
+	getPlanCapacityMultiplier,
+	getQuotaCooldownResetAt,
 	getWeeklyResetAt,
 	isQuotaErrorMessage,
 	isUsageUntouched,
+	normalizeCodexPlanType,
 	parseCodexUsageResponse,
 	pickBestAccount,
 } from "./index";
@@ -100,12 +103,17 @@ type StreamContext = Parameters<StreamWrapper>[1];
 type BaseProvider = Parameters<typeof createStreamWrapper>[1];
 
 describe("usage helpers", () => {
-	it("parses usage response windows", () => {
+	it("parses usage response windows and plan metadata", () => {
 		const response = parseCodexUsageResponse({
+			plan_type: "prolite",
 			rate_limit: {
 				primary_window: {
+					limit_window_seconds: 18_000,
+					reset_after_seconds: 120,
 					reset_at: 1700000000,
 					used_percent: 12.5,
+					allowed: true,
+					limit_reached: false,
 				},
 				secondary_window: {
 					reset_at: 1700003600,
@@ -114,8 +122,13 @@ describe("usage helpers", () => {
 			},
 		});
 
+		expect(response.planType).toBe("prolite");
 		expect(response.primary?.usedPercent).toBe(12.5);
 		expect(response.primary?.resetAt).toBe(1700000000 * 1000);
+		expect(response.primary?.limitWindowSeconds).toBe(18_000);
+		expect(response.primary?.resetAfterSeconds).toBe(120);
+		expect(response.primary?.allowed).toBe(true);
+		expect(response.primary?.limitReached).toBe(false);
 		expect(response.secondary?.usedPercent).toBe(0);
 		expect(response.secondary?.resetAt).toBe(1700003600 * 1000);
 	});
@@ -155,6 +168,40 @@ describe("usage helpers", () => {
 				fetchedAt: 0,
 			}),
 		).toBe(1000);
+	});
+
+	it("normalizes plan types into capacity multipliers", () => {
+		expect(normalizeCodexPlanType("free")).toBe("free");
+		expect(normalizeCodexPlanType("chatgpt-plus-plan")).toBe("plus");
+		expect(normalizeCodexPlanType("ChatGPT Pro Lite Plan")).toBe("prolite");
+		expect(normalizeCodexPlanType("chatgpt-pro-plan")).toBe("pro");
+		expect(normalizeCodexPlanType("mystery")).toBe("unknown");
+		expect(getPlanCapacityMultiplier("free")).toBe(0.1);
+		expect(getPlanCapacityMultiplier("prolite")).toBe(5);
+		expect(getPlanCapacityMultiplier("pro")).toBe(20);
+	});
+
+	it("chooses quota cooldown from exhausted or most constrained windows", () => {
+		expect(
+			getQuotaCooldownResetAt(
+				{
+					primary: { usedPercent: 100, resetAt: 2000 },
+					secondary: { limitReached: true, usedPercent: 90, resetAt: 5000 },
+					fetchedAt: 0,
+				},
+				1000,
+			),
+		).toBe(5000);
+		expect(
+			getQuotaCooldownResetAt(
+				{
+					primary: { usedPercent: 50, resetAt: 2000 },
+					secondary: { usedPercent: 95, resetAt: 5000 },
+					fetchedAt: 0,
+				},
+				1000,
+			),
+		).toBe(5000);
 	});
 });
 
@@ -232,6 +279,86 @@ describe("pickBestAccount", () => {
 
 		const selected = pickBestAccount(accounts, usage, { now: 0 });
 		expect(selected?.email).toBe("sh01");
+	});
+
+	it("uses plan capacity for weighted selection", () => {
+		const accounts = [makeAccount("plus"), makeAccount("pro")];
+		const usage = new Map([
+			[
+				"plus",
+				{
+					planType: "plus",
+					primary: { usedPercent: 50, resetAt: 5 * 60 * 60 * 1000 },
+					secondary: { usedPercent: 10, resetAt: 6 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+			[
+				"pro",
+				{
+					planType: "pro",
+					primary: { usedPercent: 90, resetAt: 5 * 60 * 60 * 1000 },
+					secondary: { usedPercent: 90, resetAt: 24 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+		]);
+
+		const selected = pickBestAccount(accounts, usage, { now: 0 });
+		expect(selected?.email).toBe("pro");
+	});
+
+	it("penalizes near-empty 5h capacity even when weekly reset is urgent", () => {
+		const accounts = [makeAccount("thin-pro"), makeAccount("healthy-plus")];
+		const usage = new Map([
+			[
+				"thin-pro",
+				{
+					planType: "pro",
+					primary: { usedPercent: 99.9, resetAt: 5 * 60 * 60 * 1000 },
+					secondary: { usedPercent: 10, resetAt: 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+			[
+				"healthy-plus",
+				{
+					planType: "plus",
+					primary: { usedPercent: 50, resetAt: 5 * 60 * 60 * 1000 },
+					secondary: { usedPercent: 50, resetAt: 7 * 24 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+		]);
+
+		const selected = pickBestAccount(accounts, usage, { now: 0 });
+		expect(selected?.email).toBe("healthy-plus");
+	});
+
+	it("treats free as low capacity when comparing tiers", () => {
+		const accounts = [makeAccount("free"), makeAccount("plus")];
+		const usage = new Map([
+			[
+				"free",
+				{
+					planType: "free",
+					primary: { usedPercent: 0, resetAt: 7 * 24 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+			[
+				"plus",
+				{
+					planType: "plus",
+					primary: { usedPercent: 70, resetAt: 5 * 60 * 60 * 1000 },
+					secondary: { usedPercent: 70, resetAt: 7 * 24 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+		]);
+
+		const selected = pickBestAccount(accounts, usage, { now: 0 });
+		expect(selected?.email).toBe("plus");
 	});
 
 	it("falls back to available account when usage is unknown", () => {

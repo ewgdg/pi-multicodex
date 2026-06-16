@@ -1,10 +1,26 @@
 import type { Account } from "./storage";
 import {
 	type CodexUsageSnapshot,
-	getMaxUsedPercent,
+	getPlanCapacityMultiplier,
 	getWeeklyResetAt,
 	isUsageUntouched,
 } from "./usage";
+
+const MIN_WEEKLY_RESET_HOURS = 0.25;
+const PRIMARY_THIN_UNITS = 0.15;
+const PRIMARY_NEAR_ZERO_UNITS = 0.03;
+
+interface RotationCandidate {
+	account: Account;
+	usage: CodexUsageSnapshot;
+	primaryRemainingUnits: number;
+	weeklyRemainingUnits?: number;
+	effectiveRemainingUnits: number;
+	weeklyBurnPressure: number;
+	primaryGatePenalty: number;
+	weeklyResetAt: number;
+	score: number;
+}
 
 export function isAccountAvailable(account: Account, now: number): boolean {
 	if (account.needsReauth) return false;
@@ -16,28 +32,112 @@ function pickRandomAccount(accounts: Account[]): Account | undefined {
 	return accounts[Math.floor(Math.random() * accounts.length)];
 }
 
-function pickLowestUsageAccount(
-	accounts: Account[],
-	usageByEmail: Map<string, CodexUsageSnapshot>,
-): Account | undefined {
-	const candidates = accounts
-		.map((account) => {
-			const usage = usageByEmail.get(account.email);
-			return {
-				account,
-				usedPercent: getMaxUsedPercent(usage) ?? 100,
-				resetAt: getWeeklyResetAt(usage) ?? Number.MAX_SAFE_INTEGER,
-			};
-		})
-		.sort((a, b) => {
-			// Primary: lowest usage first
-			const usageDiff = a.usedPercent - b.usedPercent;
-			if (usageDiff !== 0) return usageDiff;
-			// Tiebreaker: earliest weekly reset first
-			return a.resetAt - b.resetAt;
-		});
+function getRemainingPercent(usedPercent?: number): number | undefined {
+	if (typeof usedPercent !== "number") return undefined;
+	return Math.max(0, 100 - usedPercent);
+}
 
-	return candidates[0]?.account;
+function getHoursUntilFutureReset(
+	resetAt: number | undefined,
+	now: number,
+): number | undefined {
+	if (typeof resetAt !== "number" || resetAt <= now) return undefined;
+	return Math.max(MIN_WEEKLY_RESET_HOURS, (resetAt - now) / 3_600_000);
+}
+
+function getPrimaryGatePenalty(primaryRemainingUnits: number): number {
+	if (primaryRemainingUnits <= PRIMARY_NEAR_ZERO_UNITS) return -1;
+	if (primaryRemainingUnits <= PRIMARY_THIN_UNITS) return -0.25;
+	return 0;
+}
+
+function normalize(value: number, max: number): number {
+	if (!Number.isFinite(value) || value <= 0 || max <= 0) return 0;
+	return Math.min(1, value / max);
+}
+
+function buildCandidate(
+	account: Account,
+	usage: CodexUsageSnapshot,
+	now: number,
+): Omit<RotationCandidate, "score"> | undefined {
+	const primaryRemainingPercent = getRemainingPercent(
+		usage.primary?.usedPercent,
+	);
+	if (primaryRemainingPercent === undefined) return undefined;
+
+	const weeklyRemainingPercent = getRemainingPercent(
+		usage.secondary?.usedPercent,
+	);
+	const multiplier = getPlanCapacityMultiplier(usage.planType);
+	const primaryRemainingUnits = (primaryRemainingPercent / 100) * multiplier;
+	const weeklyRemainingUnits =
+		weeklyRemainingPercent === undefined
+			? undefined
+			: (weeklyRemainingPercent / 100) * multiplier;
+	const effectiveRemainingUnits =
+		weeklyRemainingUnits === undefined
+			? primaryRemainingUnits
+			: Math.min(primaryRemainingUnits, weeklyRemainingUnits);
+	const weeklyResetAt = getWeeklyResetAt(usage) ?? Number.MAX_SAFE_INTEGER;
+	const hoursUntilWeeklyReset = getHoursUntilFutureReset(weeklyResetAt, now);
+	const weeklyBurnPressure =
+		weeklyRemainingUnits === undefined || hoursUntilWeeklyReset === undefined
+			? 0
+			: weeklyRemainingUnits / hoursUntilWeeklyReset;
+
+	return {
+		account,
+		usage,
+		primaryRemainingUnits,
+		weeklyRemainingUnits,
+		effectiveRemainingUnits,
+		weeklyBurnPressure,
+		primaryGatePenalty: getPrimaryGatePenalty(primaryRemainingUnits),
+		weeklyResetAt,
+	};
+}
+
+function scoreCandidates(
+	candidates: Array<Omit<RotationCandidate, "score">>,
+): RotationCandidate[] {
+	const maxPrimary = Math.max(
+		...candidates.map((candidate) => candidate.primaryRemainingUnits),
+		0,
+	);
+	const maxEffective = Math.max(
+		...candidates.map((candidate) => candidate.effectiveRemainingUnits),
+		0,
+	);
+	const maxWeeklyBurn = Math.max(
+		...candidates.map((candidate) => candidate.weeklyBurnPressure),
+		0,
+	);
+
+	return candidates.map((candidate) => {
+		const primaryScore = Math.sqrt(
+			normalize(candidate.primaryRemainingUnits, maxPrimary),
+		);
+		const effectiveScore = normalize(
+			candidate.effectiveRemainingUnits,
+			maxEffective,
+		);
+		const weeklyBurnScore = normalize(
+			candidate.weeklyBurnPressure,
+			maxWeeklyBurn,
+		);
+		const untouchedBonus = isUsageUntouched(candidate.usage) ? 0.05 : 0;
+		return {
+			...candidate,
+			score:
+				0.4 * weeklyBurnScore +
+				0.3 * primaryScore +
+				0.2 * effectiveScore +
+				0.05 +
+				untouchedBonus +
+				candidate.primaryGatePenalty,
+		};
+	});
 }
 
 export function pickBestAccount(
@@ -53,22 +153,21 @@ export function pickBestAccount(
 	);
 	if (available.length === 0) return undefined;
 
-	const withUsage = available.filter((account) =>
-		usageByEmail.has(account.email),
-	);
-	const untouched = withUsage.filter((account) =>
-		isUsageUntouched(usageByEmail.get(account.email)),
-	);
-
-	if (untouched.length > 0) {
-		return (
-			pickLowestUsageAccount(untouched, usageByEmail) ??
-			pickRandomAccount(untouched)
+	const candidates = available
+		.map((account) => {
+			const usage = usageByEmail.get(account.email);
+			return usage ? buildCandidate(account, usage, now) : undefined;
+		})
+		.filter(
+			(candidate): candidate is Omit<RotationCandidate, "score"> =>
+				candidate !== undefined,
 		);
-	}
 
-	const lowestUsage = pickLowestUsageAccount(withUsage, usageByEmail);
-	if (lowestUsage) return lowestUsage;
+	const ranked = scoreCandidates(candidates).sort((a, b) => {
+		const scoreDiff = b.score - a.score;
+		if (scoreDiff !== 0) return scoreDiff;
+		return a.weeklyResetAt - b.weeklyResetAt;
+	});
 
-	return pickRandomAccount(available);
+	return ranked[0]?.account ?? pickRandomAccount(available);
 }

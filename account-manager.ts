@@ -11,7 +11,7 @@ import {
 	type StorageData,
 	saveStorage,
 } from "./storage";
-import { type CodexUsageSnapshot, getNextResetAt } from "./usage";
+import { type CodexUsageSnapshot, getQuotaCooldownResetAt } from "./usage";
 import { fetchCodexUsage } from "./usage-client";
 
 const USAGE_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -399,7 +399,7 @@ export class AccountManager {
 			signal: options?.signal,
 		});
 		const now = Date.now();
-		const resetAt = getNextResetAt(usage);
+		const resetAt = getQuotaCooldownResetAt(usage, now);
 		const fallback = now + QUOTA_COOLDOWN_MS;
 		const until = resetAt && resetAt > now ? resetAt : fallback;
 		this.markExhausted(account.email, until);

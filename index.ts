@@ -19,12 +19,16 @@ export {
 } from "./status";
 export type { Account } from "./storage";
 export { createStreamWrapper } from "./stream-wrapper";
-export type { CodexUsageSnapshot } from "./usage";
+export type { CodexPlanType, CodexUsageSnapshot } from "./usage";
 export {
 	formatResetAt,
 	getMaxUsedPercent,
 	getNextResetAt,
+	getPlanCapacityMultiplier,
+	getQuotaCooldownResetAt,
 	getWeeklyResetAt,
 	isUsageUntouched,
+	normalizeCodexPlanType,
+	PLAN_CAPACITY_MULTIPLIERS,
 	parseCodexUsageResponse,
 } from "./usage";

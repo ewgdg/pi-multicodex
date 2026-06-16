@@ -727,10 +727,11 @@ async function runRotationSubcommand(
 ): Promise<void> {
 	const lines = [
 		"Current policy: session-start selection, then sticky active account for later requests.",
-		"Session selection prefers manual account, then untouched accounts, then lowest max 5h/weekly usage, then earliest weekly reset, then random fallback.",
+		"Session selection prefers manual account, then a tier-weighted score using weekly burn pressure, effective remaining quota, and soft 5h safety penalty.",
+		"Plan hints scale remaining quota for scoring: free=0.1x, plus=1x, prolite=5x, pro=20x; unknown tiers use 1x.",
 		"Per request, MultiCodex keeps the active account to preserve provider prompt cache affinity.",
 		"If token validation fails before a request starts, MultiCodex skips that account and retries another one.",
-		"If a request hits quota or rate limit before any output streams, MultiCodex marks the account on cooldown and retries.",
+		"If a request hits quota or rate limit before any output streams, MultiCodex marks the account on cooldown until the exhausted or most constrained reset window clears, then retries.",
 		"Pi login accounts are imported into the same managed pool and rotate like any other account.",
 	];
 

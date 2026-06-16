@@ -24,7 +24,7 @@ When you start a session, MultiCodex:
 
 1. Imports your existing pi Codex auth automatically (if present) into the managed account pool.
 2. Checks usage data across all managed accounts, including the imported pi login account.
-3. Picks the best available account — untouched accounts first, then lowest max 5-hour/weekly usage, then the one whose weekly reset window ends soonest, then a random available account as fallback.
+3. Picks the best available account with a tier-weighted rotation score. The score uses plan hints from Codex usage metadata (`free` = 0.1x, `plus` = 1x, `prolite` = 5x, `pro` = 20x), weekly burn pressure, effective remaining quota, and a soft 5-hour safety penalty.
 
 For later requests in the same session, MultiCodex keeps using the active account instead of re-ranking every turn. It only selects another account when the active account becomes unavailable before output starts.
 
@@ -86,8 +86,8 @@ You can customize which fields appear and their ordering with `/multicodex foote
 - **Provider override.** MultiCodex registers itself as the `openai-codex` provider. You do not need to select a different provider or change your model — it works with whatever Codex model you already use.
 - **Auth import.** When pi has stored Codex OAuth credentials, MultiCodex imports them automatically into the same managed account pool used by manually added accounts and labels that account as `pi auth` in the UI.
 - **Token refresh.** OAuth tokens are refreshed before expiry so requests do not fail due to stale credentials. You can also force a health refresh with `/multicodex refresh` or re-authenticate explicitly with `/multicodex reauth`.
-- **Usage tracking.** Usage data is fetched from the Codex API and cached for 5 minutes per account. The footer renders cached data immediately and refreshes in the background.
-- **Quota cooldown.** When an account is exhausted, it stays on cooldown until its next known reset time (or 1 hour if the reset time is unknown).
+- **Usage tracking.** Usage data is fetched from the Codex API and cached for 5 minutes per account. The footer renders cached data immediately and refreshes in the background. When available, Codex plan metadata is used as a capacity hint for rotation scoring.
+- **Quota cooldown.** When an account is exhausted, it stays on cooldown until the exhausted or most constrained known reset window clears (or 1 hour if reset time is unknown).
 - **Shared utility seams.** Provider mirroring, stream primitives, and `~/.pi/agent/*` path helpers are shared with `pi-credential-vault` through `@victor-software-house/pi-provider-utils`. MultiCodex still owns account storage, token policy, footer behavior, and command UX.
 
 ## Local development

@@ -120,7 +120,11 @@ describe("registerCommands", () => {
 
 		expect(select).not.toHaveBeenCalled();
 		expect(notify).toHaveBeenCalledWith(
-			expect.stringContaining("Current policy"),
+			expect.stringContaining("tier-weighted score"),
+			"info",
+		);
+		expect(notify).toHaveBeenCalledWith(
+			expect.not.stringContaining("lowest max 5h/weekly usage"),
 			"info",
 		);
 	});
