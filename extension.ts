@@ -57,13 +57,18 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		lifecycleVersion += 1;
 		const version = lifecycleVersion;
 		accountManager.resetSessionWarnings();
+		const rotationContext = { ctx, reason: event.reason };
 		if (event.reason === "new") {
-			handleNewSessionSwitch(accountManager, (msg) =>
-				notifyIfCurrent(ctx, version, msg),
+			handleNewSessionSwitch(
+				accountManager,
+				(msg) => notifyIfCurrent(ctx, version, msg),
+				rotationContext,
 			);
 		} else {
-			handleSessionStart(accountManager, (msg) =>
-				notifyIfCurrent(ctx, version, msg),
+			handleSessionStart(
+				accountManager,
+				(msg) => notifyIfCurrent(ctx, version, msg),
+				rotationContext,
 			);
 		}
 		statusController.startAutoRefresh();

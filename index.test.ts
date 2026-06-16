@@ -283,6 +283,74 @@ describe("pickBestAccount", () => {
 		expect(selected?.email).toBe("gmail");
 	});
 
+	it("adds cache affinity bonus for recent large active context", () => {
+		const accounts = [makeAccount("gmail"), makeAccount("outlook")];
+		const usage = new Map([
+			[
+				"gmail",
+				{
+					planType: "plus",
+					primary: { usedPercent: 17, resetAt: 5 * 60 * 60 * 1000 },
+					secondary: { usedPercent: 85, resetAt: 34 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+			[
+				"outlook",
+				{
+					planType: "plus",
+					primary: { usedPercent: 4, resetAt: 5 * 60 * 60 * 1000 },
+					secondary: { usedPercent: 19, resetAt: 152.5 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+		]);
+
+		const selected = pickBestAccount(accounts, usage, {
+			now: 0,
+			cacheAffinity: {
+				activeEmail: "outlook",
+				ageMs: 0,
+				contextTokens: 256_000,
+			},
+		});
+		expect(selected?.email).toBe("outlook");
+	});
+
+	it("does not let small active context overwhelm weekly pressure", () => {
+		const accounts = [makeAccount("gmail"), makeAccount("outlook")];
+		const usage = new Map([
+			[
+				"gmail",
+				{
+					planType: "plus",
+					primary: { usedPercent: 17, resetAt: 5 * 60 * 60 * 1000 },
+					secondary: { usedPercent: 85, resetAt: 34 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+			[
+				"outlook",
+				{
+					planType: "plus",
+					primary: { usedPercent: 4, resetAt: 5 * 60 * 60 * 1000 },
+					secondary: { usedPercent: 19, resetAt: 152.5 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+		]);
+
+		const selected = pickBestAccount(accounts, usage, {
+			now: 0,
+			cacheAffinity: {
+				activeEmail: "outlook",
+				ageMs: 0,
+				contextTokens: 1_000,
+			},
+		});
+		expect(selected?.email).toBe("gmail");
+	});
+
 	it("uses plan capacity for weighted selection", () => {
 		const accounts = [makeAccount("plus"), makeAccount("pro")];
 		const usage = new Map([

@@ -12,8 +12,17 @@ const WEEKLY_BURN_SCORE_WEIGHT = 0.45;
 const PRIMARY_REMAINING_SCORE_WEIGHT = 0.3;
 const EFFECTIVE_REMAINING_SCORE_WEIGHT = 0.15;
 const USAGE_CONFIDENCE_BONUS = 0.05;
+const CACHE_AFFINITY_SCORE_WEIGHT = 0.35;
+const CACHE_AFFINITY_TTL_MS = 60 * 60 * 1000;
+const CACHE_CONTEXT_SCALE_TOKENS = 64_000;
 const PRIMARY_THIN_UNITS = 0.15;
 const PRIMARY_NEAR_ZERO_UNITS = 0.03;
+
+export interface CacheAffinityContext {
+	activeEmail?: string;
+	ageMs?: number;
+	contextTokens?: number;
+}
 
 interface RotationCandidate {
 	account: Account;
@@ -61,6 +70,29 @@ function normalize(value: number, max: number): number {
 	return Math.min(1, value / max);
 }
 
+function getCacheAffinityBonus(
+	account: Account,
+	cacheAffinity?: CacheAffinityContext,
+): number {
+	if (!cacheAffinity || cacheAffinity.activeEmail !== account.email) return 0;
+	const ageMs = cacheAffinity.ageMs;
+	const contextTokens = cacheAffinity.contextTokens;
+	if (
+		typeof ageMs !== "number" ||
+		!Number.isFinite(ageMs) ||
+		ageMs < 0 ||
+		typeof contextTokens !== "number" ||
+		!Number.isFinite(contextTokens) ||
+		contextTokens <= 0
+	) {
+		return 0;
+	}
+	const cacheFreshness = Math.exp(-ageMs / CACHE_AFFINITY_TTL_MS);
+	const contextPressure =
+		1 - Math.exp(-contextTokens / CACHE_CONTEXT_SCALE_TOKENS);
+	return CACHE_AFFINITY_SCORE_WEIGHT * cacheFreshness * contextPressure;
+}
+
 function buildCandidate(
 	account: Account,
 	usage: CodexUsageSnapshot,
@@ -106,6 +138,7 @@ function buildCandidate(
 
 function scoreCandidates(
 	candidates: Array<Omit<RotationCandidate, "score">>,
+	cacheAffinity?: CacheAffinityContext,
 ): RotationCandidate[] {
 	const maxPrimary = Math.max(
 		...candidates.map((candidate) => candidate.primaryRemainingUnits),
@@ -133,6 +166,10 @@ function scoreCandidates(
 			maxWeeklyBurn,
 		);
 		const untouchedBonus = isUsageUntouched(candidate.usage) ? 0.05 : 0;
+		const cacheAffinityBonus = getCacheAffinityBonus(
+			candidate.account,
+			cacheAffinity,
+		);
 		return {
 			...candidate,
 			score:
@@ -141,6 +178,7 @@ function scoreCandidates(
 				EFFECTIVE_REMAINING_SCORE_WEIGHT * effectiveScore +
 				USAGE_CONFIDENCE_BONUS +
 				untouchedBonus +
+				cacheAffinityBonus +
 				candidate.primaryGatePenalty,
 		};
 	});
@@ -149,7 +187,11 @@ function scoreCandidates(
 export function pickBestAccount(
 	accounts: Account[],
 	usageByEmail: Map<string, CodexUsageSnapshot>,
-	options?: { excludeEmails?: Set<string>; now?: number },
+	options?: {
+		excludeEmails?: Set<string>;
+		now?: number;
+		cacheAffinity?: CacheAffinityContext;
+	},
 ): Account | undefined {
 	const now = options?.now ?? Date.now();
 	const available = accounts.filter(
@@ -169,11 +211,13 @@ export function pickBestAccount(
 				candidate !== undefined,
 		);
 
-	const ranked = scoreCandidates(candidates).sort((a, b) => {
-		const scoreDiff = b.score - a.score;
-		if (scoreDiff !== 0) return scoreDiff;
-		return a.weeklyResetAt - b.weeklyResetAt;
-	});
+	const ranked = scoreCandidates(candidates, options?.cacheAffinity).sort(
+		(a, b) => {
+			const scoreDiff = b.score - a.score;
+			if (scoreDiff !== 0) return scoreDiff;
+			return a.weeklyResetAt - b.weeklyResetAt;
+		},
+	);
 
 	return ranked[0]?.account ?? pickRandomAccount(available);
 }

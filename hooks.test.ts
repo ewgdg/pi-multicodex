@@ -76,6 +76,145 @@ describe("handleSessionStart", () => {
 		});
 	});
 
+	it("passes cache affinity context for existing conversations", async () => {
+		const loadPiAuth = vi.fn().mockResolvedValue(undefined);
+		const refreshUsageForAllAccounts = vi.fn().mockResolvedValue(undefined);
+		const activateBestAccount = vi.fn().mockResolvedValue(undefined);
+		const now = Date.now();
+		const ctx = {
+			getContextUsage: () => ({ tokens: 256_000 }),
+			sessionManager: {
+				getBranch: () => [
+					{
+						type: "message",
+						timestamp: new Date(now - 60_000).toISOString(),
+						message: {
+							role: "assistant",
+							provider: "openai-codex",
+							timestamp: now - 60_000,
+							usage: { input: 128_000 },
+						},
+					},
+				],
+			},
+		};
+
+		handleSessionStart(
+			{
+				getAccounts: () => [{ email: "a@example.com" }],
+				loadPiAuth,
+				refreshUsageForAllAccounts,
+				getAccountsNeedingReauth: () => [],
+				getAvailableManualAccount: vi.fn().mockReturnValue(undefined),
+				hasManualAccount: vi.fn().mockReturnValue(false),
+				clearManualAccount: vi.fn(),
+				activateBestAccount,
+				beginInitialization: vi.fn(),
+				markReady: vi.fn(),
+			} as never,
+			undefined,
+			{ ctx: ctx as never, reason: "resume" },
+		);
+
+		await vi.waitFor(() => {
+			expect(activateBestAccount).toHaveBeenCalledWith({
+				cacheAffinity: {
+					ageMs: expect.any(Number),
+					contextTokens: 256_000,
+				},
+			});
+		});
+	});
+
+	it("skips malformed Codex assistant timestamps when building cache affinity", async () => {
+		const activateBestAccount = vi.fn().mockResolvedValue(undefined);
+		const now = Date.now();
+		const ctx = {
+			getContextUsage: () => undefined,
+			sessionManager: {
+				getBranch: () => [
+					{
+						type: "message",
+						timestamp: new Date(now - 120_000).toISOString(),
+						message: {
+							role: "assistant",
+							provider: "openai-codex",
+							timestamp: now - 120_000,
+							usage: { input: 64_000 },
+						},
+					},
+					{
+						type: "message",
+						timestamp: "not-a-date",
+						message: {
+							role: "assistant",
+							provider: "openai-codex",
+							timestamp: Number.NaN,
+							usage: { input: 256_000 },
+						},
+					},
+				],
+			},
+		};
+
+		handleSessionStart(
+			{
+				getAccounts: () => [{ email: "a@example.com" }],
+				loadPiAuth: vi.fn().mockResolvedValue(undefined),
+				refreshUsageForAllAccounts: vi.fn().mockResolvedValue(undefined),
+				getAccountsNeedingReauth: () => [],
+				getAvailableManualAccount: vi.fn().mockReturnValue(undefined),
+				hasManualAccount: vi.fn().mockReturnValue(false),
+				clearManualAccount: vi.fn(),
+				activateBestAccount,
+				beginInitialization: vi.fn(),
+				markReady: vi.fn(),
+			} as never,
+			undefined,
+			{ ctx: ctx as never, reason: "reload" },
+		);
+
+		await vi.waitFor(() => {
+			expect(activateBestAccount).toHaveBeenCalledWith({
+				cacheAffinity: {
+					ageMs: expect.any(Number),
+					contextTokens: 64_000,
+				},
+			});
+		});
+	});
+
+	it("does not pass cache affinity for a new conversation", async () => {
+		const activateBestAccount = vi.fn().mockResolvedValue(undefined);
+		const ctx = {
+			getContextUsage: () => ({ tokens: 256_000 }),
+			sessionManager: { getBranch: () => [] },
+		};
+
+		handleNewSessionSwitch(
+			{
+				getAccounts: () => [{ email: "a@example.com" }],
+				loadPiAuth: vi.fn().mockResolvedValue(undefined),
+				refreshUsageForAllAccounts: vi.fn().mockResolvedValue(undefined),
+				getAccountsNeedingReauth: () => [],
+				getAvailableManualAccount: vi.fn().mockReturnValue(undefined),
+				hasManualAccount: vi.fn().mockReturnValue(false),
+				clearManualAccount: vi.fn(),
+				activateBestAccount,
+				beginInitialization: vi.fn(),
+				markReady: vi.fn(),
+			} as never,
+			undefined,
+			{ ctx: ctx as never, reason: "new" },
+		);
+
+		await vi.waitFor(() => {
+			expect(activateBestAccount).toHaveBeenCalledWith({
+				cacheAffinity: undefined,
+			});
+		});
+	});
+
 	it("keeps the manual account when one is available", async () => {
 		const loadPiAuth = vi.fn().mockResolvedValue(undefined);
 		const refreshUsageForAllAccounts = vi.fn().mockResolvedValue(undefined);

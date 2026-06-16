@@ -4,7 +4,11 @@ import {
 } from "@earendil-works/pi-ai/oauth";
 import { normalizeUnknownError } from "pi-provider-utils/streams";
 import { loadImportedOpenAICodexAuth } from "./auth";
-import { isAccountAvailable, pickBestAccount } from "./selection";
+import {
+	type CacheAffinityContext,
+	isAccountAvailable,
+	pickBestAccount,
+} from "./selection";
 import {
 	type Account,
 	loadStorage,
@@ -27,6 +31,7 @@ export class AccountManager {
 	private refreshPromises = new Map<string, Promise<string>>();
 	private warningHandler?: WarningHandler;
 	private manualEmail?: string;
+	private initializing = false;
 	private stateChangeHandlers = new Set<StateChangeHandler>();
 	private warnedAuthFailureEmails = new Set<string>();
 	private readyPromise: Promise<void> = Promise.resolve();
@@ -42,14 +47,22 @@ export class AccountManager {
 	 * on {@link waitUntilReady} so they don't race the startup refresh.
 	 */
 	beginInitialization(): void {
+		this.initializing = true;
+		this.notifyStateChanged();
 		this.readyPromise = new Promise<void>((resolve) => {
 			this.readyResolve = resolve;
 		});
 	}
 
 	markReady(): void {
+		this.initializing = false;
 		this.readyResolve?.();
 		this.readyResolve = undefined;
+		this.notifyStateChanged();
+	}
+
+	isInitializing(): boolean {
+		return this.initializing;
 	}
 
 	waitUntilReady(): Promise<void> {
@@ -374,15 +387,20 @@ export class AccountManager {
 	async activateBestAccount(options?: {
 		excludeEmails?: Set<string>;
 		signal?: AbortSignal;
+		cacheAffinity?: Omit<CacheAffinityContext, "activeEmail">;
 	}): Promise<Account | undefined> {
 		const now = Date.now();
 		this.clearExpiredExhaustion(now);
 		const accounts = this.getAccounts();
 		await this.refreshUsageIfStale(accounts, options);
 
+		const activeEmail = this.getActiveAccount()?.email;
 		const selected = pickBestAccount(accounts, this.usageCache, {
 			excludeEmails: options?.excludeEmails,
 			now,
+			cacheAffinity: options?.cacheAffinity
+				? { ...options.cacheAffinity, activeEmail }
+				: undefined,
 		});
 		if (selected) {
 			this.setActiveAccount(selected.email);

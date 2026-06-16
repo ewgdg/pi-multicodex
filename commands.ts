@@ -727,7 +727,7 @@ async function runRotationSubcommand(
 ): Promise<void> {
 	const lines = [
 		"Current policy: session-start selection, then sticky active account for later requests.",
-		"Session selection prefers manual account, then a tier-weighted score using weekly burn pressure, effective remaining quota, and soft 5h safety penalty.",
+		"Session selection prefers manual account, then a tier-weighted score using weekly burn pressure, effective remaining quota, soft 5h safety penalty, and cache affinity for recent large contexts.",
 		"Plan hints scale remaining quota for scoring: free=0.1x, plus=1x, prolite=5x, pro=20x; unknown tiers use 1x.",
 		"Per request, MultiCodex keeps the active account to preserve provider prompt cache affinity.",
 		"If token validation fails before a request starts, MultiCodex skips that account and retries another one.",

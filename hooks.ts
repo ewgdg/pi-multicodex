@@ -1,10 +1,93 @@
+import type {
+	ExtensionContext,
+	SessionStartEvent,
+} from "@earendil-works/pi-coding-agent";
 import type { AccountManager } from "./account-manager";
+import { PROVIDER_ID } from "./provider";
+import type { CacheAffinityContext } from "./selection";
 
 type WarningHandler = (message: string) => void;
+type SessionStartReason = SessionStartEvent["reason"];
+
+interface StartupRotationContext {
+	ctx: ExtensionContext;
+	reason: SessionStartReason;
+}
+
+interface LastCodexAssistantInfo {
+	ageMs: number;
+	usageTokens?: number;
+}
+
+function getEntryTimestampMs(entryTimestamp: string): number | undefined {
+	const timestamp = Date.parse(entryTimestamp);
+	return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+function getLastCodexAssistantInfo(
+	ctx: ExtensionContext,
+): LastCodexAssistantInfo | undefined {
+	const branch = ctx.sessionManager.getBranch();
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (!entry || entry.type !== "message") continue;
+		const message = entry.message;
+		if (message.role !== "assistant") continue;
+		if (message.provider !== PROVIDER_ID) continue;
+
+		const timestampMs =
+			typeof message.timestamp === "number"
+				? message.timestamp
+				: getEntryTimestampMs(entry.timestamp);
+		if (timestampMs === undefined || !Number.isFinite(timestampMs)) continue;
+
+		const usageTokens =
+			typeof message.usage?.input === "number"
+				? message.usage.input
+				: message.usage?.totalTokens;
+		return {
+			ageMs: Math.max(0, Date.now() - timestampMs),
+			usageTokens:
+				typeof usageTokens === "number" && Number.isFinite(usageTokens)
+					? usageTokens
+					: undefined,
+		};
+	}
+	return undefined;
+}
+
+function getContextTokenEstimate(
+	ctx: ExtensionContext,
+	lastCodexAssistantInfo: LastCodexAssistantInfo,
+): number | undefined {
+	const contextTokens = ctx.getContextUsage()?.tokens;
+	if (typeof contextTokens === "number" && Number.isFinite(contextTokens)) {
+		return contextTokens;
+	}
+	return lastCodexAssistantInfo.usageTokens;
+}
+
+function getStartupCacheAffinity(
+	rotationContext?: StartupRotationContext,
+): Omit<CacheAffinityContext, "activeEmail"> | undefined {
+	if (!rotationContext || rotationContext.reason === "new") return undefined;
+	const lastCodexAssistantInfo = getLastCodexAssistantInfo(rotationContext.ctx);
+	if (!lastCodexAssistantInfo) return undefined;
+	const contextTokens = getContextTokenEstimate(
+		rotationContext.ctx,
+		lastCodexAssistantInfo,
+	);
+	if (contextTokens === undefined) return undefined;
+	return {
+		ageMs: lastCodexAssistantInfo.ageMs,
+		contextTokens,
+	};
+}
 
 async function refreshAndActivateBestAccount(
 	accountManager: AccountManager,
 	warningHandler?: WarningHandler,
+	rotationContext?: StartupRotationContext,
 ): Promise<void> {
 	accountManager.beginInitialization();
 	try {
@@ -29,7 +112,9 @@ async function refreshAndActivateBestAccount(
 		if (accountManager.hasManualAccount()) {
 			accountManager.clearManualAccount();
 		}
-		await accountManager.activateBestAccount();
+		await accountManager.activateBestAccount({
+			cacheAffinity: getStartupCacheAffinity(rotationContext),
+		});
 	} finally {
 		accountManager.markReady();
 	}
@@ -38,13 +123,23 @@ async function refreshAndActivateBestAccount(
 export function handleSessionStart(
 	accountManager: AccountManager,
 	warningHandler?: WarningHandler,
+	rotationContext?: StartupRotationContext,
 ): void {
-	refreshAndActivateBestAccount(accountManager, warningHandler).catch(() => {});
+	refreshAndActivateBestAccount(
+		accountManager,
+		warningHandler,
+		rotationContext,
+	).catch(() => {});
 }
 
 export function handleNewSessionSwitch(
 	accountManager: AccountManager,
 	warningHandler?: WarningHandler,
+	rotationContext?: StartupRotationContext,
 ): void {
-	refreshAndActivateBestAccount(accountManager, warningHandler).catch(() => {});
+	refreshAndActivateBestAccount(
+		accountManager,
+		warningHandler,
+		rotationContext,
+	).catch(() => {});
 }

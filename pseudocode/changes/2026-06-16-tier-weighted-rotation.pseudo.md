@@ -4,6 +4,8 @@ affects:
   - usage-client.ts
   - selection.ts
   - account-manager.ts
+  - hooks.ts
+  - extension.ts
   - commands.ts
   - index.ts
 ---
@@ -69,6 +71,14 @@ when selecting best account:
       effective remaining units, min(primary, weekly), normalized against candidate set, with lower weight than weekly pressure so low weekly quota near reset is not over-penalized
       primary gate penalty
       usage confidence bonus
+      cache affinity bonus for the active account when caller supplies cache context
+
+    cache affinity bonus:
+      applies only to current active account
+      cacheFreshness = exp(-age since last Codex assistant response / 1 hour)
+      contextPressure = 1 - exp(-context tokens / 64000)
+      bonus = max affinity weight * cacheFreshness * contextPressure
+      this strongly protects fresh large-context sessions while allowing small or stale sessions to rerank
 
   prefer higher score
   break ties by earlier weekly reset
@@ -80,6 +90,18 @@ quota exhaustion cooldown:
   use fallback cooldown only when reset data is unavailable
 
 when showing rotation policy:
-  describe tier-weighted scoring, weekly burn pressure, soft 5-hour safety penalty, active stickiness, pre-stream retry, and cooldown behavior
+  describe tier-weighted scoring, weekly burn pressure, soft 5-hour safety penalty, cache affinity, active stickiness, pre-stream retry, and cooldown behavior
   do not describe the removed lowest-percent selection policy
+
+on session start for existing conversations:
+  inspect current branch for last Codex assistant response
+  skip malformed assistant timestamps and continue scanning older entries
+  use context usage tokens when available, otherwise fallback to last Codex assistant token usage
+  pass cache affinity context into startup ranking for reasons other than new conversation
+  do not give cache affinity bonus for a new conversation
+
+while startup account selection is in progress:
+  account manager exposes initializing state
+  footer renders a neutral selecting-account message instead of stale active account
+  footer does not refresh usage for the previous active account until initialization finishes
 ```

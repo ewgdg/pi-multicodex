@@ -24,7 +24,7 @@ When you start a session, MultiCodex:
 
 1. Imports your existing pi Codex auth automatically (if present) into the managed account pool.
 2. Checks usage data across all managed accounts, including the imported pi login account.
-3. Picks the best available account with a tier-weighted rotation score. The score uses plan hints from Codex usage metadata (`free` = 0.1x, `plus` = 1x, `prolite` = 5x, `pro` = 20x), weekly burn pressure, effective remaining quota, and a soft 5-hour safety penalty.
+3. Picks the best available account with a tier-weighted rotation score. The score uses plan hints from Codex usage metadata (`free` = 0.1x, `plus` = 1x, `prolite` = 5x, `pro` = 20x), weekly burn pressure, effective remaining quota, a soft 5-hour safety penalty, and cache affinity for recent large-context sessions.
 
 For later requests in the same session, MultiCodex keeps using the active account instead of re-ranking every turn. It only selects another account when the active account becomes unavailable before output starts.
 

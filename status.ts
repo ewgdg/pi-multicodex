@@ -26,6 +26,7 @@ const REFRESH_INTERVAL_MS = 60_000;
 const MODEL_SELECT_REFRESH_DEBOUNCE_MS = 250;
 const UNKNOWN_PERCENT = "--";
 const BRAND_LABEL = "Codex";
+const SELECTING_ACCOUNT_LABEL = "selecting account...";
 const SEGMENT_SEPARATOR = "·";
 const FIVE_HOUR_LABEL = "5h:";
 const SEVEN_DAY_LABEL = "7d:";
@@ -382,6 +383,13 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		return isRunning && activeContext === ctx && lifecycleVersion === version;
 	}
 
+	function isAccountManagerInitializing(): boolean {
+		const candidate = accountManager as AccountManager & {
+			isInitializing?: () => boolean;
+		};
+		return candidate.isInitializing?.() ?? false;
+	}
+
 	accountManager.onStateChange(() => {
 		if (!activeContext || !isRunning) return;
 		renderCachedStatus(activeContext, livePreviewPreferences ?? preferences);
@@ -401,6 +409,13 @@ export function createUsageStatusController(accountManager: AccountManager) {
 	): string | undefined {
 		if (!ctx.hasUI) return undefined;
 		if (!isManagedModel(ctx.model)) return undefined;
+
+		if (isAccountManagerInitializing()) {
+			return [
+				formatBrand(ctx),
+				ctx.ui.theme.fg("muted", SELECTING_ACCOUNT_LABEL),
+			].join(" ");
+		}
 
 		const activeAccount = accountManager.getActiveAccount();
 		if (!activeAccount) {
@@ -443,6 +458,7 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		}
 
 		renderCachedStatus(ctx, livePreviewPreferences ?? preferences);
+		if (isAccountManagerInitializing()) return;
 
 		const activeAccount = accountManager.getActiveAccount();
 		if (!activeAccount) {

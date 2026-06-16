@@ -181,6 +181,30 @@ describe("createUsageStatusController", () => {
 		expect(setStatus).toHaveBeenCalledWith("multicodex-usage", undefined);
 	});
 
+	it("renders selecting-account status while account manager initializes", async () => {
+		const setStatus = vi.fn();
+		const refreshUsageForAccount = vi.fn();
+		const controller = createUsageStatusController({
+			onStateChange: () => () => undefined,
+			isInitializing: () => true,
+			getActiveAccount: () => ({ email: "old@example.com" }),
+			getCachedUsage: vi.fn(),
+			refreshUsageForAccount,
+		} as never);
+
+		await controller.refreshFor(createContext({ setStatus }));
+
+		expect(setStatus).toHaveBeenCalledWith(
+			"multicodex-usage",
+			expect.stringContaining("selecting account..."),
+		);
+		expect(setStatus).not.toHaveBeenCalledWith(
+			"multicodex-usage",
+			expect.stringContaining("old@example.com"),
+		);
+		expect(refreshUsageForAccount).not.toHaveBeenCalled();
+	});
+
 	it("renders active-account usage for managed models", async () => {
 		const setStatus = vi.fn();
 		const controller = createUsageStatusController({

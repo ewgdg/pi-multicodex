@@ -124,6 +124,10 @@ describe("registerCommands", () => {
 			"info",
 		);
 		expect(notify).toHaveBeenCalledWith(
+			expect.stringContaining("cache affinity"),
+			"info",
+		);
+		expect(notify).toHaveBeenCalledWith(
 			expect.not.stringContaining("lowest max 5h/weekly usage"),
 			"info",
 		);
