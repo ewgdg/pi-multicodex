@@ -53,7 +53,8 @@ when selecting best account:
     weeklyRemainingUnits = weeklyRemainingPercent / 100 * capacityMultiplier
     if secondary reset is in the future:
       hoursUntilWeeklyReset = time until secondary reset, minimum small positive value
-      weeklyBurnPressure = weeklyRemainingUnits / hoursUntilWeeklyReset
+      weeklyBurnPressure = weeklyRemainingUnits / (hoursUntilWeeklyReset ^ 1.5)
+      this makes reset timing dominate enough that near-reset leftover quota beats far-reset large quota
     otherwise:
       weeklyBurnPressure = 0 because stale expired reset data must not look urgent
 
@@ -65,7 +66,7 @@ when selecting best account:
     score = weighted sum of:
       weekly burn pressure, normalized against candidate set
       primary remaining units, normalized against candidate set
-      effective remaining units, min(primary, weekly), normalized against candidate set
+      effective remaining units, min(primary, weekly), normalized against candidate set, with lower weight than weekly pressure so low weekly quota near reset is not over-penalized
       primary gate penalty
       usage confidence bonus
 

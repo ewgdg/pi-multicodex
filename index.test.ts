@@ -256,29 +256,31 @@ describe("pickBestAccount", () => {
 		expect(selected?.email).toBe("a");
 	});
 
-	it("ignores 5h reset and prefers earliest weekly reset", () => {
-		const accounts = [makeAccount("sh01"), makeAccount("hind")];
+	it("weights weekly burn pressure toward near resets", () => {
+		const accounts = [makeAccount("gmail"), makeAccount("outlook")];
 		const usage = new Map([
 			[
-				"sh01",
+				"gmail",
 				{
-					primary: { usedPercent: 0, resetAt: 60 * 60 * 1000 },
-					secondary: { usedPercent: 9, resetAt: 5 * 24 * 60 * 60 * 1000 },
+					planType: "plus",
+					primary: { usedPercent: 17, resetAt: 5 * 60 * 60 * 1000 },
+					secondary: { usedPercent: 85, resetAt: 34 * 60 * 60 * 1000 },
 					fetchedAt: 0,
 				},
 			],
 			[
-				"hind",
+				"outlook",
 				{
-					primary: { usedPercent: 24, resetAt: 55 * 60 * 1000 },
-					secondary: { usedPercent: 13, resetAt: 6 * 24 * 60 * 60 * 1000 },
+					planType: "plus",
+					primary: { usedPercent: 4, resetAt: 5 * 60 * 60 * 1000 },
+					secondary: { usedPercent: 19, resetAt: 152.5 * 60 * 60 * 1000 },
 					fetchedAt: 0,
 				},
 			],
 		]);
 
 		const selected = pickBestAccount(accounts, usage, { now: 0 });
-		expect(selected?.email).toBe("sh01");
+		expect(selected?.email).toBe("gmail");
 	});
 
 	it("uses plan capacity for weighted selection", () => {
@@ -289,7 +291,7 @@ describe("pickBestAccount", () => {
 				{
 					planType: "plus",
 					primary: { usedPercent: 50, resetAt: 5 * 60 * 60 * 1000 },
-					secondary: { usedPercent: 10, resetAt: 6 * 60 * 60 * 1000 },
+					secondary: { usedPercent: 50, resetAt: 24 * 60 * 60 * 1000 },
 					fetchedAt: 0,
 				},
 			],

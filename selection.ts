@@ -7,6 +7,11 @@ import {
 } from "./usage";
 
 const MIN_WEEKLY_RESET_HOURS = 0.25;
+const WEEKLY_BURN_TIME_EXPONENT = 1.5;
+const WEEKLY_BURN_SCORE_WEIGHT = 0.45;
+const PRIMARY_REMAINING_SCORE_WEIGHT = 0.3;
+const EFFECTIVE_REMAINING_SCORE_WEIGHT = 0.15;
+const USAGE_CONFIDENCE_BONUS = 0.05;
 const PRIMARY_THIN_UNITS = 0.15;
 const PRIMARY_NEAR_ZERO_UNITS = 0.03;
 
@@ -84,7 +89,8 @@ function buildCandidate(
 	const weeklyBurnPressure =
 		weeklyRemainingUnits === undefined || hoursUntilWeeklyReset === undefined
 			? 0
-			: weeklyRemainingUnits / hoursUntilWeeklyReset;
+			: weeklyRemainingUnits /
+				hoursUntilWeeklyReset ** WEEKLY_BURN_TIME_EXPONENT;
 
 	return {
 		account,
@@ -130,10 +136,10 @@ function scoreCandidates(
 		return {
 			...candidate,
 			score:
-				0.4 * weeklyBurnScore +
-				0.3 * primaryScore +
-				0.2 * effectiveScore +
-				0.05 +
+				WEEKLY_BURN_SCORE_WEIGHT * weeklyBurnScore +
+				PRIMARY_REMAINING_SCORE_WEIGHT * primaryScore +
+				EFFECTIVE_REMAINING_SCORE_WEIGHT * effectiveScore +
+				USAGE_CONFIDENCE_BONUS +
 				untouchedBonus +
 				candidate.primaryGatePenalty,
 		};
