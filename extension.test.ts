@@ -5,7 +5,6 @@ const mocks = vi.hoisted(() => ({
 	handleSessionStart: vi.fn(),
 	handleNewSessionSwitch: vi.fn(),
 	buildMulticodexProviderConfig: vi.fn(() => ({ mocked: true })),
-	setWarningHandler: vi.fn(),
 	resetSessionWarnings: vi.fn(),
 	statusRefreshFor: vi.fn(),
 	statusStartAutoRefresh: vi.fn(),
@@ -16,7 +15,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("./account-manager", () => ({
 	AccountManager: class MockAccountManager {
-		setWarningHandler = mocks.setWarningHandler;
 		resetSessionWarnings = mocks.resetSessionWarnings;
 	},
 }));
@@ -47,13 +45,24 @@ vi.mock("./status", () => ({
 
 import multicodexExtension from "./extension";
 
+function createMockContext(sessionKey = "session-a") {
+	return {
+		ui: { notify: vi.fn() },
+		sessionManager: {
+			getSessionFile: () => sessionKey,
+			getSessionId: () => sessionKey,
+		},
+	};
+}
+
 describe("multicodexExtension", () => {
 	beforeEach(() => {
 		mocks.registerCommands.mockClear();
-		mocks.handleSessionStart.mockClear();
-		mocks.handleNewSessionSwitch.mockClear();
+		mocks.handleSessionStart.mockReset();
+		mocks.handleSessionStart.mockResolvedValue(undefined);
+		mocks.handleNewSessionSwitch.mockReset();
+		mocks.handleNewSessionSwitch.mockResolvedValue(undefined);
 		mocks.buildMulticodexProviderConfig.mockClear();
-		mocks.setWarningHandler.mockClear();
 		mocks.resetSessionWarnings.mockClear();
 		mocks.statusRefreshFor.mockClear();
 		mocks.statusStartAutoRefresh.mockClear();
@@ -74,7 +83,6 @@ describe("multicodexExtension", () => {
 			on,
 		} as never);
 
-		expect(mocks.setWarningHandler).toHaveBeenCalledOnce();
 		expect(mocks.buildMulticodexProviderConfig).toHaveBeenCalledOnce();
 		expect(registerProvider).toHaveBeenCalledWith("openai-codex", {
 			mocked: true,
@@ -87,43 +95,15 @@ describe("multicodexExtension", () => {
 		expect(handlers.has("session_shutdown")).toBe(true);
 	});
 
-	it("keeps warning notification failures from escaping", () => {
+	it("awaits startup session work before continuing", async () => {
 		const handlers = new Map<string, (...args: unknown[]) => void>();
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-		const ctx = {
-			ui: {
-				notify: vi.fn(() => {
-					throw new Error("stale ctx");
-				}),
-			},
-		};
-
-		try {
-			multicodexExtension({
-				registerProvider: vi.fn(),
-				on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
-					handlers.set(event, handler);
-				}),
-			} as never);
-
-			handlers.get("session_start")?.({ reason: "resume" }, ctx as never);
-			const accountWarning = mocks.setWarningHandler.mock.calls[0]?.[0] as
-				| ((message: string) => void)
-				| undefined;
-
-			expect(() => accountWarning?.("warning")).not.toThrow();
-			expect(warn).toHaveBeenCalledWith(
-				"[multicodex] Failed to show warning:",
-				expect.any(Error),
-			);
-		} finally {
-			warn.mockRestore();
-		}
-	});
-
-	it("drops async warnings after session shutdown", () => {
-		const handlers = new Map<string, (...args: unknown[]) => void>();
-		const ctx = { ui: { notify: vi.fn() } };
+		let release!: () => void;
+		const started = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		mocks.handleSessionStart.mockImplementation(async () => {
+			await started;
+		});
 
 		multicodexExtension({
 			registerProvider: vi.fn(),
@@ -132,28 +112,194 @@ describe("multicodexExtension", () => {
 			}),
 		} as never);
 
-		handlers.get("session_start")?.({ reason: "resume" }, ctx as never);
+		const ctx = createMockContext();
+		const sessionStart = handlers.get("session_start");
+		expect(sessionStart).toBeTypeOf("function");
+
+		const running = sessionStart?.({ reason: "resume" }, ctx as never);
+		expect(mocks.handleSessionStart).toHaveBeenCalledOnce();
+		expect(mocks.statusLoadPreferences).not.toHaveBeenCalled();
+		release();
+		await running;
+		expect(mocks.statusLoadPreferences).toHaveBeenCalledOnce();
+	});
+
+	it("does not resume startup side effects after session shutdown", async () => {
+		const handlers = new Map<string, (...args: unknown[]) => void>();
+		let release!: () => void;
+		const started = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		mocks.handleSessionStart.mockImplementation(async () => {
+			await started;
+		});
+
+		multicodexExtension({
+			registerProvider: vi.fn(),
+			on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+				handlers.set(event, handler);
+			}),
+		} as never);
+
+		const ctx = createMockContext();
+		const running = handlers.get("session_start")?.(
+			{ reason: "resume" },
+			ctx as never,
+		);
+		handlers.get("session_shutdown")?.({}, ctx as never);
+		release();
+		await running;
+
+		expect(mocks.statusStartAutoRefresh).not.toHaveBeenCalled();
+		expect(mocks.statusLoadPreferences).not.toHaveBeenCalled();
+	});
+
+	it("ignores stale shutdown from previous session", async () => {
+		const handlers = new Map<string, (...args: unknown[]) => void>();
+		const ctxA = createMockContext("session-a");
+		const ctxB = createMockContext("session-b");
+
+		multicodexExtension({
+			registerProvider: vi.fn(),
+			on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+				handlers.set(event, handler);
+			}),
+		} as never);
+
+		await handlers.get("session_start")?.({ reason: "resume" }, ctxA as never);
+		let release!: () => void;
+		const started = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		mocks.handleSessionStart.mockImplementationOnce(async () => {
+			await started;
+		});
+
+		const runningB = handlers.get("session_start")?.(
+			{ reason: "resume" },
+			ctxB as never,
+		);
+		handlers.get("session_shutdown")?.({}, ctxA as never);
+		release();
+		await runningB;
+
+		expect(mocks.statusStopAutoRefresh).not.toHaveBeenCalled();
+		expect(mocks.statusStartAutoRefresh).toHaveBeenCalledTimes(2);
+		expect(mocks.statusLoadPreferences).toHaveBeenCalledTimes(2);
+	});
+
+	it("ignores stale turn and model events from previous session", async () => {
+		const handlers = new Map<string, (...args: unknown[]) => void>();
+		const ctxA = createMockContext("session-a");
+		const ctxB = createMockContext("session-b");
+
+		multicodexExtension({
+			registerProvider: vi.fn(),
+			on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+				handlers.set(event, handler);
+			}),
+		} as never);
+
+		await handlers.get("session_start")?.({ reason: "resume" }, ctxA as never);
+		await handlers.get("session_start")?.({ reason: "resume" }, ctxB as never);
+		handlers.get("turn_end")?.({}, ctxA as never);
+		handlers.get("model_select")?.({}, ctxA as never);
+		handlers.get("session_shutdown")?.({}, ctxB as never);
+
+		expect(mocks.statusRefreshFor).toHaveBeenCalledTimes(2);
+		expect(mocks.statusScheduleModelSelectRefresh).not.toHaveBeenCalled();
+		expect(mocks.statusStopAutoRefresh).toHaveBeenCalledWith(ctxB);
+	});
+
+	it("ignores stale ctx events whose session getters throw", async () => {
+		const handlers = new Map<string, (...args: unknown[]) => void>();
+		const currentCtx = createMockContext("session-a");
+		const staleCtx = {
+			ui: { notify: vi.fn() },
+			get sessionManager() {
+				throw new Error("stale ctx");
+			},
+		};
+
+		multicodexExtension({
+			registerProvider: vi.fn(),
+			on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+				handlers.set(event, handler);
+			}),
+		} as never);
+
+		await handlers.get("session_start")?.(
+			{ reason: "resume" },
+			currentCtx as never,
+		);
+		handlers.get("turn_end")?.({}, staleCtx as never);
+		handlers.get("model_select")?.({}, staleCtx as never);
+		handlers.get("session_shutdown")?.({}, staleCtx as never);
+
+		expect(mocks.statusRefreshFor).toHaveBeenCalledOnce();
+		expect(mocks.statusScheduleModelSelectRefresh).not.toHaveBeenCalled();
+		expect(mocks.statusStopAutoRefresh).not.toHaveBeenCalled();
+	});
+
+	it("ignores stale ctx events after active session is cleared", async () => {
+		const handlers = new Map<string, (...args: unknown[]) => void>();
+		const currentCtx = createMockContext("session-a");
+		const staleCtx = {
+			ui: { notify: vi.fn() },
+			get sessionManager() {
+				throw new Error("stale ctx");
+			},
+		};
+
+		multicodexExtension({
+			registerProvider: vi.fn(),
+			on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+				handlers.set(event, handler);
+			}),
+		} as never);
+
+		await handlers.get("session_start")?.(
+			{ reason: "resume" },
+			currentCtx as never,
+		);
+		handlers.get("session_shutdown")?.({}, currentCtx as never);
+		handlers.get("turn_end")?.({}, staleCtx as never);
+		handlers.get("model_select")?.({}, staleCtx as never);
+		handlers.get("session_shutdown")?.({}, staleCtx as never);
+
+		expect(mocks.statusRefreshFor).toHaveBeenCalledOnce();
+		expect(mocks.statusScheduleModelSelectRefresh).not.toHaveBeenCalled();
+		expect(mocks.statusStopAutoRefresh).toHaveBeenCalledOnce();
+	});
+
+	it("drops async warnings after session shutdown", async () => {
+		const handlers = new Map<string, (...args: unknown[]) => void>();
+		const ctx = createMockContext();
+
+		multicodexExtension({
+			registerProvider: vi.fn(),
+			on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+				handlers.set(event, handler);
+			}),
+		} as never);
+
+		await handlers.get("session_start")?.({ reason: "resume" }, ctx as never);
 		const sessionStartWarning = mocks.handleSessionStart.mock.calls[0]?.[1] as
-			| ((message: string) => void)
-			| undefined;
-		const accountWarning = mocks.setWarningHandler.mock.calls[0]?.[0] as
 			| ((message: string) => void)
 			| undefined;
 
 		sessionStartWarning?.("active hook warning");
-		accountWarning?.("active account warning");
-		expect(ctx.ui.notify).toHaveBeenCalledTimes(2);
+		expect(ctx.ui.notify).toHaveBeenCalledOnce();
 
 		handlers.get("session_shutdown")?.({}, ctx as never);
 		sessionStartWarning?.("stale hook warning");
-		accountWarning?.("stale account warning");
 
-		expect(ctx.ui.notify).toHaveBeenCalledTimes(2);
+		expect(ctx.ui.notify).toHaveBeenCalledOnce();
 	});
 
 	it("routes session and status events to the helpers", async () => {
 		const handlers = new Map<string, (...args: unknown[]) => void>();
-		const ctx = { ui: { notify: vi.fn() } };
+		const ctx = createMockContext();
 
 		multicodexExtension({
 			registerProvider: vi.fn(),
@@ -171,7 +317,7 @@ describe("multicodexExtension", () => {
 		expect(modelSelect).toBeTypeOf("function");
 		expect(sessionShutdown).toBeTypeOf("function");
 
-		sessionStart?.({ reason: "resume" }, ctx as never);
+		await sessionStart?.({ reason: "resume" }, ctx as never);
 		expect(mocks.resetSessionWarnings).toHaveBeenCalledTimes(1);
 		expect(mocks.handleSessionStart).toHaveBeenCalledOnce();
 		expect(mocks.handleNewSessionSwitch).not.toHaveBeenCalled();
@@ -181,7 +327,7 @@ describe("multicodexExtension", () => {
 			expect(mocks.statusRefreshFor).toHaveBeenCalledTimes(1);
 		});
 
-		sessionStart?.({ reason: "new" }, ctx as never);
+		await sessionStart?.({ reason: "new" }, ctx as never);
 		expect(mocks.resetSessionWarnings).toHaveBeenCalledTimes(2);
 		expect(mocks.handleNewSessionSwitch).toHaveBeenCalledOnce();
 		expect(mocks.statusStartAutoRefresh).toHaveBeenCalledTimes(2);

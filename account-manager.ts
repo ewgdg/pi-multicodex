@@ -24,6 +24,13 @@ const QUOTA_COOLDOWN_MS = 60 * 60 * 1000;
 
 type WarningHandler = (message: string) => void;
 type StateChangeHandler = () => void;
+type InitializationToken = symbol;
+
+interface UsageRefreshOptions {
+	force?: boolean;
+	signal?: AbortSignal;
+	warningHandler?: WarningHandler;
+}
 
 export class AccountManager {
 	private data: StorageData;
@@ -36,26 +43,33 @@ export class AccountManager {
 	private warnedAuthFailureEmails = new Set<string>();
 	private readyPromise: Promise<void> = Promise.resolve();
 	private readyResolve?: () => void;
+	private initializationToken?: InitializationToken;
 
 	constructor() {
 		this.data = loadStorage();
 	}
 
 	/**
-	 * Mark the account manager as initializing. The returned promise
-	 * resolves when {@link markReady} is called. Stream requests wait
-	 * on {@link waitUntilReady} so they don't race the startup refresh.
+	 * Mark the account manager as initializing. Stream requests wait on
+	 * {@link waitUntilReady} so they don't race the latest startup refresh.
 	 */
-	beginInitialization(): void {
-		this.initializing = true;
-		this.notifyStateChanged();
-		this.readyPromise = new Promise<void>((resolve) => {
-			this.readyResolve = resolve;
-		});
+	beginInitialization(): InitializationToken {
+		const token = Symbol("multicodex-initialization");
+		this.initializationToken = token;
+		if (!this.initializing) {
+			this.initializing = true;
+			this.readyPromise = new Promise<void>((resolve) => {
+				this.readyResolve = resolve;
+			});
+			this.notifyStateChanged();
+		}
+		return token;
 	}
 
-	markReady(): void {
+	markReady(token?: InitializationToken): void {
+		if (token && token !== this.initializationToken) return;
 		this.initializing = false;
+		this.initializationToken = undefined;
 		this.readyResolve?.();
 		this.readyResolve = undefined;
 		this.notifyStateChanged();
@@ -235,9 +249,9 @@ export class AccountManager {
 	 * Read pi's openai-codex auth from auth.json and merge it into the
 	 * normal managed account pool so pi-login accounts behave like all others.
 	 */
-	async loadPiAuth(): Promise<void> {
+	async loadPiAuth(options?: { shouldApply?: () => boolean }): Promise<void> {
 		const imported = await loadImportedOpenAICodexAuth();
-		if (!imported) return;
+		if (!imported || options?.shouldApply?.() === false) return;
 
 		const account = this.addOrUpdateAccount(
 			imported.identifier,
@@ -324,7 +338,7 @@ export class AccountManager {
 
 	async refreshUsageForAccount(
 		account: Account,
-		options?: { force?: boolean; signal?: AbortSignal },
+		options?: UsageRefreshOptions,
 	): Promise<CodexUsageSnapshot | undefined> {
 		if (account.needsReauth) return this.usageCache.get(account.email);
 
@@ -348,7 +362,7 @@ export class AccountManager {
 			this.notifyStateChanged();
 			return usage;
 		} catch (error) {
-			this.warningHandler?.(
+			(options?.warningHandler ?? this.warningHandler)?.(
 				`Multicodex: failed to fetch usage for ${account.email}: ${normalizeUnknownError(
 					error,
 				)}`,
@@ -357,10 +371,9 @@ export class AccountManager {
 		}
 	}
 
-	async refreshUsageForAllAccounts(options?: {
-		force?: boolean;
-		signal?: AbortSignal;
-	}): Promise<void> {
+	async refreshUsageForAllAccounts(
+		options?: UsageRefreshOptions,
+	): Promise<void> {
 		const accounts = this.getAccounts();
 		await Promise.all(
 			accounts.map((account) => this.refreshUsageForAccount(account, options)),
@@ -369,7 +382,7 @@ export class AccountManager {
 
 	async refreshUsageIfStale(
 		accounts: Account[],
-		options?: { signal?: AbortSignal },
+		options?: Omit<UsageRefreshOptions, "force">,
 	): Promise<void> {
 		const now = Date.now();
 		const stale = accounts.filter((account) => {
@@ -388,11 +401,15 @@ export class AccountManager {
 		excludeEmails?: Set<string>;
 		signal?: AbortSignal;
 		cacheAffinity?: Omit<CacheAffinityContext, "activeEmail">;
+		warningHandler?: WarningHandler;
+		shouldApply?: () => boolean;
 	}): Promise<Account | undefined> {
+		if (options?.shouldApply?.() === false) return undefined;
 		const now = Date.now();
 		this.clearExpiredExhaustion(now);
 		const accounts = this.getAccounts();
 		await this.refreshUsageIfStale(accounts, options);
+		if (options?.shouldApply?.() === false) return undefined;
 
 		const activeEmail = this.getActiveAccount()?.email;
 		const selected = pickBestAccount(accounts, this.usageCache, {
@@ -402,7 +419,7 @@ export class AccountManager {
 				? { ...options.cacheAffinity, activeEmail }
 				: undefined,
 		});
-		if (selected) {
+		if (selected && options?.shouldApply?.() !== false) {
 			this.setActiveAccount(selected.email);
 		}
 		return selected;
@@ -410,11 +427,12 @@ export class AccountManager {
 
 	async handleQuotaExceeded(
 		account: Account,
-		options?: { signal?: AbortSignal },
+		options?: { signal?: AbortSignal; warningHandler?: WarningHandler },
 	): Promise<void> {
 		const usage = await this.refreshUsageForAccount(account, {
 			force: true,
 			signal: options?.signal,
+			warningHandler: options?.warningHandler,
 		});
 		const now = Date.now();
 		const resetAt = getQuotaCooldownResetAt(usage, now);

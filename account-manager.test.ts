@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
 		activeEmail: undefined as string | undefined,
 	},
 	loadImportedOpenAICodexAuth: vi.fn(),
+	fetchCodexUsage: vi.fn(),
 	saveStorage: vi.fn(),
 }));
 
@@ -24,6 +25,10 @@ vi.mock("./auth", () => ({
 
 vi.mock("@earendil-works/pi-ai/oauth", () => ({
 	refreshOpenAICodexToken: vi.fn(),
+}));
+
+vi.mock("./usage-client", () => ({
+	fetchCodexUsage: mocks.fetchCodexUsage,
 }));
 
 import { AccountManager } from "./account-manager";
@@ -145,6 +150,24 @@ describe("AccountManager pi auth import", () => {
 
 		expect(manager.getAccounts()).toHaveLength(1);
 		expect(manager.getAccount("managed@example.com")).toBeDefined();
+		expect(mocks.saveStorage).not.toHaveBeenCalled();
+	});
+
+	it("does not import pi auth when startup becomes stale before apply", async () => {
+		mocks.loadImportedOpenAICodexAuth.mockResolvedValue({
+			identifier: "pi@example.com",
+			fingerprint: "fp",
+			credentials: {
+				access: "pi-access",
+				refresh: "pi-refresh",
+				expires: Date.now() + 3600_000,
+			},
+		});
+
+		const manager = new AccountManager();
+		await manager.loadPiAuth({ shouldApply: () => false });
+
+		expect(manager.getAccounts()).toHaveLength(0);
 		expect(mocks.saveStorage).not.toHaveBeenCalled();
 	});
 });
@@ -357,6 +380,44 @@ describe("AccountManager imported pi auth exhaustion handling", () => {
 	});
 });
 
+describe("AccountManager activation freshness", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mocks.storageData.accounts = [
+			{
+				email: "old@example.com",
+				accessToken: "old-access",
+				refreshToken: "old-refresh",
+				expiresAt: Date.now() + 3600_000,
+			},
+			{
+				email: "new@example.com",
+				accessToken: "new-access",
+				refreshToken: "new-refresh",
+				expiresAt: Date.now() + 3600_000,
+			},
+		];
+		mocks.storageData.activeEmail = "old@example.com";
+		mocks.loadImportedOpenAICodexAuth.mockResolvedValue(undefined);
+	});
+
+	it("does not set active account when startup becomes stale during usage refresh", async () => {
+		let current = true;
+		mocks.fetchCodexUsage.mockImplementation(async () => {
+			current = false;
+			return { fetchedAt: Date.now() };
+		});
+
+		const manager = new AccountManager();
+		const selected = await manager.activateBestAccount({
+			shouldApply: () => current,
+		});
+
+		expect(selected).toBeUndefined();
+		expect(manager.getActiveAccount()?.email).toBe("old@example.com");
+	});
+});
+
 describe("AccountManager ready-gate", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
@@ -405,6 +466,24 @@ describe("AccountManager ready-gate", () => {
 		expect(resolved).toBe(false);
 
 		manager.markReady();
+		await waiting;
+		expect(resolved).toBe(true);
+	});
+
+	it("keeps the ready gate pending until the latest overlapping initialization finishes", async () => {
+		const manager = new AccountManager();
+		const first = manager.beginInitialization();
+		let resolved = false;
+		const waiting = manager.waitUntilReady().then(() => {
+			resolved = true;
+		});
+		const second = manager.beginInitialization();
+
+		manager.markReady(first);
+		await Promise.resolve();
+		expect(resolved).toBe(false);
+
+		manager.markReady(second);
 		await waiting;
 		expect(resolved).toBe(true);
 	});

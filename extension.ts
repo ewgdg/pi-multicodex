@@ -12,21 +12,32 @@ import { createUsageStatusController } from "./status";
 export default function multicodexExtension(pi: ExtensionAPI) {
 	const accountManager = new AccountManager();
 	const statusController = createUsageStatusController(accountManager);
-	let activeContext: ExtensionContext | undefined;
+	let activeSessionKey: string | undefined;
 	let lifecycleVersion = 0;
 
+	function getSessionKey(ctx: ExtensionContext): string | undefined {
+		try {
+			// Pi creates a fresh ctx object for each event, so object identity cannot
+			// define session ownership. Stale ctx getters throw; treat that as non-current.
+			return (
+				ctx.sessionManager.getSessionFile() ?? ctx.sessionManager.getSessionId()
+			);
+		} catch {
+			return undefined;
+		}
+	}
+
 	function isCurrentContext(ctx: ExtensionContext, version: number): boolean {
-		return activeContext === ctx && lifecycleVersion === version;
+		const sessionKey = getSessionKey(ctx);
+		return (
+			Boolean(sessionKey) &&
+			activeSessionKey === sessionKey &&
+			lifecycleVersion === version
+		);
 	}
 
 	function notifyWarning(ctx: ExtensionContext, message: string): void {
-		try {
-			ctx.ui.notify(message, "warning");
-		} catch (error) {
-			// UI warnings are best-effort; stale session-bound ctx must not break streaming.
-			activeContext = undefined;
-			console.warn("[multicodex] Failed to show warning:", error);
-		}
+		ctx.ui.notify(message, "warning");
 	}
 
 	function notifyIfCurrent(
@@ -39,12 +50,6 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	accountManager.setWarningHandler((message) => {
-		if (activeContext) {
-			notifyWarning(activeContext, message);
-		}
-	});
-
 	pi.registerProvider(
 		PROVIDER_ID,
 		buildMulticodexProviderConfig(accountManager),
@@ -52,46 +57,53 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 
 	registerCommands(pi, accountManager, statusController);
 
-	pi.on("session_start", (event: SessionStartEvent, ctx: ExtensionContext) => {
-		activeContext = ctx;
-		lifecycleVersion += 1;
-		const version = lifecycleVersion;
-		accountManager.resetSessionWarnings();
-		const rotationContext = { ctx, reason: event.reason };
-		if (event.reason === "new") {
-			handleNewSessionSwitch(
-				accountManager,
-				(msg) => notifyIfCurrent(ctx, version, msg),
-				rotationContext,
-			);
-		} else {
-			handleSessionStart(
-				accountManager,
-				(msg) => notifyIfCurrent(ctx, version, msg),
-				rotationContext,
-			);
-		}
-		statusController.startAutoRefresh();
-		void (async () => {
+	pi.on(
+		"session_start",
+		async (event: SessionStartEvent, ctx: ExtensionContext) => {
+			activeSessionKey = getSessionKey(ctx);
+			lifecycleVersion += 1;
+			const version = lifecycleVersion;
+			accountManager.resetSessionWarnings();
+			const rotationContext = {
+				ctx,
+				reason: event.reason,
+				isCurrent: () => isCurrentContext(ctx, version),
+			};
+			if (event.reason === "new") {
+				await handleNewSessionSwitch(
+					accountManager,
+					(msg) => notifyIfCurrent(ctx, version, msg),
+					rotationContext,
+				);
+			} else {
+				await handleSessionStart(
+					accountManager,
+					(msg) => notifyIfCurrent(ctx, version, msg),
+					rotationContext,
+				);
+			}
+			if (!isCurrentContext(ctx, version)) return;
+			statusController.startAutoRefresh();
 			await statusController.loadPreferences(ctx);
 			if (!isCurrentContext(ctx, version)) return;
 			await statusController.refreshFor(ctx);
-		})();
-	});
+		},
+	);
 
 	pi.on("turn_end", (_event: unknown, ctx: ExtensionContext) => {
-		activeContext = ctx;
+		if (!activeSessionKey || getSessionKey(ctx) !== activeSessionKey) return;
 		void statusController.refreshFor(ctx);
 	});
 
 	pi.on("model_select", (_event: unknown, ctx: ExtensionContext) => {
-		activeContext = ctx;
+		if (!activeSessionKey || getSessionKey(ctx) !== activeSessionKey) return;
 		statusController.scheduleModelSelectRefresh(ctx);
 	});
 
 	pi.on("session_shutdown", (_event: unknown, ctx: ExtensionContext) => {
+		if (!activeSessionKey || getSessionKey(ctx) !== activeSessionKey) return;
 		lifecycleVersion += 1;
-		activeContext = undefined;
+		activeSessionKey = undefined;
 		statusController.stopAutoRefresh(ctx);
 	});
 }

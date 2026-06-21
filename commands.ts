@@ -305,7 +305,10 @@ async function refreshSingleAccount(
 		return;
 	}
 
-	await accountManager.refreshUsageForAccount(account, { force: true });
+	await accountManager.refreshUsageForAccount(account, {
+		force: true,
+		warningHandler: (message) => ctx.ui.notify(message, "warning"),
+	});
 	ctx.ui.notify(
 		`refreshed ${formatAccountStatusLine(accountManager, email, usageMode)}`,
 		"info",
@@ -316,7 +319,10 @@ async function refreshAllAccounts(
 	ctx: ExtensionCommandContext,
 	accountManager: AccountManager,
 ): Promise<void> {
-	await accountManager.refreshUsageForAllAccounts({ force: true });
+	await accountManager.refreshUsageForAllAccounts({
+		force: true,
+		warningHandler: (message) => ctx.ui.notify(message, "warning"),
+	});
 	const accounts = accountManager.getAccounts();
 	const needsReauth = accountManager.getAccountsNeedingReauth().length;
 	const summary =
@@ -666,7 +672,9 @@ async function runAccountsSubcommand(
 	statusController: ReturnType<typeof createUsageStatusController>,
 	rest: string,
 ): Promise<void> {
-	await accountManager.refreshUsageForAllAccounts();
+	await accountManager.refreshUsageForAllAccounts({
+		warningHandler: (message) => ctx.ui.notify(message, "warning"),
+	});
 
 	if (rest) {
 		await useOrLoginAccount(pi, ctx, accountManager, rest);

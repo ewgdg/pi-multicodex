@@ -315,6 +315,85 @@ describe("createUsageStatusController", () => {
 		expect(refreshUsageForAccount).not.toHaveBeenCalled();
 	});
 
+	it("drops a stale stored context during auto-refresh", async () => {
+		vi.useFakeTimers();
+		const setStatus = vi.fn();
+		let stale = false;
+		const ctx = {
+			get hasUI() {
+				if (stale) throw new Error("stale ctx");
+				return true;
+			},
+			get model() {
+				if (stale) throw new Error("stale ctx");
+				return { provider: "openai-codex" };
+			},
+			ui: {
+				setStatus,
+				notify: vi.fn(),
+				theme: {
+					fg: (_token: string, text: string) => text,
+					bold: (text: string) => text,
+				},
+			},
+		};
+		const controller = createUsageStatusController({
+			onStateChange: () => () => undefined,
+			getActiveAccount: () => ({ email: "a@example.com" }),
+			getCachedUsage: vi.fn(),
+			refreshUsageForAccount: vi.fn().mockResolvedValue({ fetchedAt: 0 }),
+		} as never);
+
+		await controller.refreshFor(ctx as never);
+		controller.startAutoRefresh();
+		stale = true;
+		setStatus.mockClear();
+
+		await vi.advanceTimersByTimeAsync(60_000);
+
+		expect(setStatus).not.toHaveBeenCalled();
+	});
+
+	it("ignores account state changes when the stored context is stale", async () => {
+		let stateChangeHandler: (() => void) | undefined;
+		let stale = false;
+		const setStatus = vi.fn();
+		const ctx = {
+			get hasUI() {
+				if (stale) throw new Error("stale ctx");
+				return true;
+			},
+			get model() {
+				if (stale) throw new Error("stale ctx");
+				return { provider: "openai-codex" };
+			},
+			ui: {
+				setStatus,
+				notify: vi.fn(),
+				theme: {
+					fg: (_token: string, text: string) => text,
+					bold: (text: string) => text,
+				},
+			},
+		};
+		const controller = createUsageStatusController({
+			onStateChange: (handler: () => void) => {
+				stateChangeHandler = handler;
+				return () => undefined;
+			},
+			getActiveAccount: () => ({ email: "a@example.com" }),
+			getCachedUsage: vi.fn(),
+			refreshUsageForAccount: vi.fn().mockResolvedValue({ fetchedAt: 0 }),
+		} as never);
+
+		await controller.refreshFor(ctx as never);
+		stale = true;
+		setStatus.mockClear();
+
+		expect(() => stateChangeHandler?.()).not.toThrow();
+		expect(setStatus).not.toHaveBeenCalled();
+	});
+
 	it("does not touch a stale context after session shutdown during refresh", async () => {
 		const setStatus = vi.fn();
 		let resolveUsage:

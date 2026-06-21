@@ -117,12 +117,14 @@ describe("handleSessionStart", () => {
 		);
 
 		await vi.waitFor(() => {
-			expect(activateBestAccount).toHaveBeenCalledWith({
-				cacheAffinity: {
-					ageMs: expect.any(Number),
-					contextTokens: 256_000,
-				},
-			});
+			expect(activateBestAccount).toHaveBeenCalledWith(
+				expect.objectContaining({
+					cacheAffinity: {
+						ageMs: expect.any(Number),
+						contextTokens: 256_000,
+					},
+				}),
+			);
 		});
 	});
 
@@ -175,12 +177,14 @@ describe("handleSessionStart", () => {
 		);
 
 		await vi.waitFor(() => {
-			expect(activateBestAccount).toHaveBeenCalledWith({
-				cacheAffinity: {
-					ageMs: expect.any(Number),
-					contextTokens: 64_000,
-				},
-			});
+			expect(activateBestAccount).toHaveBeenCalledWith(
+				expect.objectContaining({
+					cacheAffinity: {
+						ageMs: expect.any(Number),
+						contextTokens: 64_000,
+					},
+				}),
+			);
 		});
 	});
 
@@ -209,10 +213,45 @@ describe("handleSessionStart", () => {
 		);
 
 		await vi.waitFor(() => {
-			expect(activateBestAccount).toHaveBeenCalledWith({
-				cacheAffinity: undefined,
-			});
+			expect(activateBestAccount).toHaveBeenCalledWith(
+				expect.objectContaining({
+					cacheAffinity: undefined,
+				}),
+			);
 		});
+	});
+
+	it("does not mutate active account when startup becomes stale before activation", async () => {
+		let current = true;
+		const refreshUsageForAllAccounts = vi.fn().mockImplementation(async () => {
+			current = false;
+		});
+		const clearManualAccount = vi.fn();
+		const activateBestAccount = vi.fn().mockResolvedValue(undefined);
+
+		await handleSessionStart(
+			{
+				getAccounts: () => [{ email: "a@example.com" }],
+				loadPiAuth: vi.fn().mockResolvedValue(undefined),
+				refreshUsageForAllAccounts,
+				getAccountsNeedingReauth: () => [],
+				getAvailableManualAccount: vi.fn().mockReturnValue(undefined),
+				hasManualAccount: vi.fn().mockReturnValue(true),
+				clearManualAccount,
+				activateBestAccount,
+				beginInitialization: vi.fn(() => Symbol("init")),
+				markReady: vi.fn(),
+			} as never,
+			undefined,
+			{
+				ctx: { sessionManager: { getBranch: () => [] } } as never,
+				reason: "resume",
+				isCurrent: () => current,
+			},
+		);
+
+		expect(clearManualAccount).not.toHaveBeenCalled();
+		expect(activateBestAccount).not.toHaveBeenCalled();
 	});
 
 	it("keeps the manual account when one is available", async () => {

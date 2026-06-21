@@ -12,6 +12,7 @@ type SessionStartReason = SessionStartEvent["reason"];
 interface StartupRotationContext {
 	ctx: ExtensionContext;
 	reason: SessionStartReason;
+	isCurrent?: () => boolean;
 }
 
 interface LastCodexAssistantInfo {
@@ -67,10 +68,20 @@ function getContextTokenEstimate(
 	return lastCodexAssistantInfo.usageTokens;
 }
 
+function isStartupCurrent(rotationContext?: StartupRotationContext): boolean {
+	return rotationContext?.isCurrent?.() ?? true;
+}
+
 function getStartupCacheAffinity(
 	rotationContext?: StartupRotationContext,
 ): Omit<CacheAffinityContext, "activeEmail"> | undefined {
-	if (!rotationContext || rotationContext.reason === "new") return undefined;
+	if (
+		!rotationContext ||
+		rotationContext.reason === "new" ||
+		!isStartupCurrent(rotationContext)
+	) {
+		return undefined;
+	}
 	const lastCodexAssistantInfo = getLastCodexAssistantInfo(rotationContext.ctx);
 	if (!lastCodexAssistantInfo) return undefined;
 	const contextTokens = getContextTokenEstimate(
@@ -89,13 +100,19 @@ async function refreshAndActivateBestAccount(
 	warningHandler?: WarningHandler,
 	rotationContext?: StartupRotationContext,
 ): Promise<void> {
-	accountManager.beginInitialization();
+	const initializationToken = accountManager.beginInitialization();
 	try {
-		await accountManager.loadPiAuth();
+		await accountManager.loadPiAuth({
+			shouldApply: () => isStartupCurrent(rotationContext),
+		});
+		if (!isStartupCurrent(rotationContext)) return;
 		// Pi auth is ephemeral, so it only appears after loadPiAuth runs.
 		if (accountManager.getAccounts().length === 0) return;
 
-		await accountManager.refreshUsageForAllAccounts({ force: true });
+		await accountManager.refreshUsageForAllAccounts(
+			warningHandler ? { force: true, warningHandler } : { force: true },
+		);
+		if (!isStartupCurrent(rotationContext)) return;
 
 		const needsReauth = accountManager.getAccountsNeedingReauth();
 		if (needsReauth.length > 0) {
@@ -109,37 +126,49 @@ async function refreshAndActivateBestAccount(
 
 		const manual = accountManager.getAvailableManualAccount();
 		if (manual) return;
+		if (!isStartupCurrent(rotationContext)) return;
 		if (accountManager.hasManualAccount()) {
 			accountManager.clearManualAccount();
 		}
+		if (!isStartupCurrent(rotationContext)) return;
 		await accountManager.activateBestAccount({
 			cacheAffinity: getStartupCacheAffinity(rotationContext),
+			shouldApply: () => isStartupCurrent(rotationContext),
+			...(warningHandler ? { warningHandler } : {}),
 		});
 	} finally {
-		accountManager.markReady();
+		accountManager.markReady(initializationToken);
 	}
 }
 
-export function handleSessionStart(
+export async function handleSessionStart(
 	accountManager: AccountManager,
 	warningHandler?: WarningHandler,
 	rotationContext?: StartupRotationContext,
-): void {
-	refreshAndActivateBestAccount(
-		accountManager,
-		warningHandler,
-		rotationContext,
-	).catch(() => {});
+): Promise<void> {
+	try {
+		await refreshAndActivateBestAccount(
+			accountManager,
+			warningHandler,
+			rotationContext,
+		);
+	} catch {
+		// Startup refresh is best-effort; session still needs to come up.
+	}
 }
 
-export function handleNewSessionSwitch(
+export async function handleNewSessionSwitch(
 	accountManager: AccountManager,
 	warningHandler?: WarningHandler,
 	rotationContext?: StartupRotationContext,
-): void {
-	refreshAndActivateBestAccount(
-		accountManager,
-		warningHandler,
-		rotationContext,
-	).catch(() => {});
+): Promise<void> {
+	try {
+		await refreshAndActivateBestAccount(
+			accountManager,
+			warningHandler,
+			rotationContext,
+		);
+	} catch {
+		// Startup refresh is best-effort; session still needs to come up.
+	}
 }

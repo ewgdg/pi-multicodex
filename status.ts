@@ -390,13 +390,29 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		return candidate.isInitializing?.() ?? false;
 	}
 
+	function withLiveContext<T>(
+		ctx: ExtensionContext,
+		operation: () => T,
+	): T | undefined {
+		try {
+			return operation();
+		} catch {
+			if (activeContext === ctx) {
+				activeContext = undefined;
+				queuedRefresh = false;
+			}
+			return undefined;
+		}
+	}
+
 	accountManager.onStateChange(() => {
 		if (!activeContext || !isRunning) return;
 		renderCachedStatus(activeContext, livePreviewPreferences ?? preferences);
 	});
 
 	function clearStatus(ctx?: ExtensionContext): void {
-		ctx?.ui.setStatus(STATUS_KEY, undefined);
+		if (!ctx) return;
+		withLiveContext(ctx, () => ctx.ui.setStatus(STATUS_KEY, undefined));
 	}
 
 	async function ensurePreferencesLoaded(): Promise<void> {
@@ -407,43 +423,47 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		ctx: ExtensionContext,
 		preferencesOverride?: FooterPreferences,
 	): string | undefined {
-		if (!ctx.hasUI) return undefined;
-		if (!isManagedModel(ctx.model)) return undefined;
+		return withLiveContext(ctx, () => {
+			if (!ctx.hasUI) return undefined;
+			if (!isManagedModel(ctx.model)) return undefined;
 
-		if (isAccountManagerInitializing()) {
-			return [
-				formatBrand(ctx),
-				ctx.ui.theme.fg("muted", SELECTING_ACCOUNT_LABEL),
-			].join(" ");
-		}
+			if (isAccountManagerInitializing()) {
+				return [
+					formatBrand(ctx),
+					ctx.ui.theme.fg("muted", SELECTING_ACCOUNT_LABEL),
+				].join(" ");
+			}
 
-		const activeAccount = accountManager.getActiveAccount();
-		if (!activeAccount) {
-			return ctx.ui.theme.fg("warning", "Multicodex no active account");
-		}
+			const activeAccount = accountManager.getActiveAccount();
+			if (!activeAccount) {
+				return ctx.ui.theme.fg("warning", "Multicodex no active account");
+			}
 
-		return formatActiveAccountStatus(
-			ctx,
-			activeAccount.email,
-			accountManager.getCachedUsage(activeAccount.email),
-			preferencesOverride ?? preferences,
-		);
+			return formatActiveAccountStatus(
+				ctx,
+				activeAccount.email,
+				accountManager.getCachedUsage(activeAccount.email),
+				preferencesOverride ?? preferences,
+			);
+		});
 	}
 
 	function renderCachedStatus(
 		ctx: ExtensionContext,
 		preferencesOverride?: FooterPreferences,
 	): void {
-		if (!ctx.hasUI) return;
-		if (!isManagedModel(ctx.model)) {
-			clearStatus(ctx);
-			return;
-		}
+		withLiveContext(ctx, () => {
+			if (!ctx.hasUI) return;
+			if (!isManagedModel(ctx.model)) {
+				clearStatus(ctx);
+				return;
+			}
 
-		const text = getStatusText(ctx, preferencesOverride);
-		if (text) {
-			ctx.ui.setStatus(STATUS_KEY, text);
-		}
+			const text = getStatusText(ctx, preferencesOverride);
+			if (text) {
+				ctx.ui.setStatus(STATUS_KEY, text);
+			}
+		});
 	}
 
 	async function updateStatus(
@@ -451,36 +471,47 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		version: number,
 	): Promise<void> {
 		if (!isCurrentContext(ctx, version)) return;
-		if (!ctx.hasUI) return;
-		if (!isManagedModel(ctx.model)) {
-			clearStatus(ctx);
-			return;
-		}
+		const activeAccount = withLiveContext(ctx, () => {
+			if (!ctx.hasUI) return undefined;
+			if (!isManagedModel(ctx.model)) {
+				clearStatus(ctx);
+				return undefined;
+			}
 
-		renderCachedStatus(ctx, livePreviewPreferences ?? preferences);
-		if (isAccountManagerInitializing()) return;
+			renderCachedStatus(ctx, livePreviewPreferences ?? preferences);
+			if (isAccountManagerInitializing()) return undefined;
 
-		const activeAccount = accountManager.getActiveAccount();
-		if (!activeAccount) {
-			ctx.ui.setStatus(
-				STATUS_KEY,
-				ctx.ui.theme.fg("warning", "Multicodex no active account"),
-			);
-			return;
-		}
+			const account = accountManager.getActiveAccount();
+			if (!account) {
+				ctx.ui.setStatus(
+					STATUS_KEY,
+					ctx.ui.theme.fg("warning", "Multicodex no active account"),
+				);
+				return undefined;
+			}
+			return account;
+		});
+		if (!activeAccount) return;
 
 		const cachedUsage = accountManager.getCachedUsage(activeAccount.email);
 		const usage =
-			(await accountManager.refreshUsageForAccount(activeAccount)) ??
-			cachedUsage;
+			(await accountManager.refreshUsageForAccount(activeAccount, {
+				warningHandler: (message) => {
+					if (isCurrentContext(ctx, version)) {
+						withLiveContext(ctx, () => ctx.ui.notify(message, "warning"));
+					}
+				},
+			})) ?? cachedUsage;
 		if (!isCurrentContext(ctx, version)) return;
-		ctx.ui.setStatus(
-			STATUS_KEY,
-			formatActiveAccountStatus(
-				ctx,
-				activeAccount.email,
-				usage,
-				livePreviewPreferences ?? preferences,
+		withLiveContext(ctx, () =>
+			ctx.ui.setStatus(
+				STATUS_KEY,
+				formatActiveAccountStatus(
+					ctx,
+					activeAccount.email,
+					usage,
+					livePreviewPreferences ?? preferences,
+				),
 			),
 		);
 	}
@@ -558,13 +589,13 @@ export function createUsageStatusController(accountManager: AccountManager) {
 			await ensurePreferencesLoaded();
 		} catch (error) {
 			preferences = DEFAULT_PREFERENCES;
-			if (
-				!ctx ||
-				(isRunning && (!activeContext || isCurrentContext(ctx, version)))
-			) {
-				ctx?.ui.notify(
-					`Multicodex: failed to load ${SETTINGS_FILE}: ${String(error)}`,
-					"warning",
+			if (!ctx) return;
+			if (isRunning && (!activeContext || isCurrentContext(ctx, version))) {
+				withLiveContext(ctx, () =>
+					ctx.ui.notify(
+						`Multicodex: failed to load ${SETTINGS_FILE}: ${String(error)}`,
+						"warning",
+					),
 				);
 			}
 		}
