@@ -380,6 +380,142 @@ describe("AccountManager imported pi auth exhaustion handling", () => {
 	});
 });
 
+describe("AccountManager quota cooldown reconciliation", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mocks.storageData.accounts = [
+			{
+				email: "cooldown@example.com",
+				accessToken: "access-token",
+				refreshToken: "refresh-token",
+				expiresAt: Date.now() + 3600_000,
+				quotaExhaustedUntil: Date.now() + 3600_000,
+			},
+		];
+		mocks.storageData.activeEmail = "cooldown@example.com";
+		mocks.loadImportedOpenAICodexAuth.mockResolvedValue(undefined);
+	});
+
+	it("clears quota cooldown immediately when its reset time elapsed", async () => {
+		mocks.storageData.accounts[0] = {
+			...mocks.storageData.accounts[0],
+			quotaExhaustedUntil: Date.now() - 1000,
+		};
+
+		const manager = new AccountManager();
+		const cleared = await manager.reconcileQuotaCooldowns();
+
+		expect(cleared).toBe(1);
+		expect(
+			manager.getAccount("cooldown@example.com")?.quotaExhaustedUntil,
+		).toBeUndefined();
+		expect(mocks.fetchCodexUsage).not.toHaveBeenCalled();
+		expect(mocks.saveStorage).toHaveBeenCalledTimes(1);
+	});
+
+	it("clears a stale quota cooldown when fresh usage is strongly healthy", async () => {
+		mocks.fetchCodexUsage.mockResolvedValue({
+			primary: {
+				usedPercent: 0,
+				allowed: true,
+				limitReached: false,
+				resetAt: Date.now() + 3600_000,
+			},
+			secondary: {
+				usedPercent: 0,
+				allowed: true,
+				limitReached: false,
+				resetAt: Date.now() + 7 * 24 * 3600_000,
+			},
+			fetchedAt: Date.now(),
+		});
+
+		const manager = new AccountManager();
+		const cleared = await manager.reconcileQuotaCooldowns();
+
+		expect(cleared).toBe(1);
+		expect(
+			manager.getAccount("cooldown@example.com")?.quotaExhaustedUntil,
+		).toBeUndefined();
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledTimes(1);
+		expect(mocks.saveStorage).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		[
+			"primary",
+			{ primary: { usedPercent: 0, allowed: true, limitReached: false } },
+		],
+		[
+			"secondary",
+			{ secondary: { usedPercent: 0, allowed: true, limitReached: false } },
+		],
+	])("keeps quota cooldown when fresh usage is missing the %s window", async (_windowName, partialUsage) => {
+		const originalCooldown = mocks.storageData.accounts[0]
+			?.quotaExhaustedUntil as number;
+		mocks.fetchCodexUsage.mockResolvedValue({
+			...partialUsage,
+			fetchedAt: Date.now(),
+		});
+
+		const manager = new AccountManager();
+		const cleared = await manager.reconcileQuotaCooldowns();
+
+		expect(cleared).toBe(0);
+		expect(
+			manager.getAccount("cooldown@example.com")?.quotaExhaustedUntil,
+		).toBe(originalCooldown);
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledTimes(1);
+		expect(mocks.saveStorage).not.toHaveBeenCalled();
+	});
+
+	it("keeps quota cooldown when fresh usage remains near the limit boundary", async () => {
+		const originalCooldown = mocks.storageData.accounts[0]
+			?.quotaExhaustedUntil as number;
+		mocks.fetchCodexUsage.mockResolvedValue({
+			primary: {
+				usedPercent: 99.6,
+				allowed: true,
+				limitReached: false,
+				resetAt: Date.now() + 3600_000,
+			},
+			secondary: {
+				usedPercent: 10,
+				allowed: true,
+				limitReached: false,
+				resetAt: Date.now() + 7 * 24 * 3600_000,
+			},
+			fetchedAt: Date.now(),
+		});
+
+		const manager = new AccountManager();
+		const cleared = await manager.reconcileQuotaCooldowns();
+
+		expect(cleared).toBe(0);
+		expect(
+			manager.getAccount("cooldown@example.com")?.quotaExhaustedUntil,
+		).toBe(originalCooldown);
+		expect(mocks.saveStorage).not.toHaveBeenCalled();
+	});
+
+	it("keeps quota cooldown when usage refresh fails", async () => {
+		const warningHandler = vi.fn();
+		const originalCooldown = mocks.storageData.accounts[0]
+			?.quotaExhaustedUntil as number;
+		mocks.fetchCodexUsage.mockRejectedValue(new Error("usage unavailable"));
+
+		const manager = new AccountManager();
+		const cleared = await manager.reconcileQuotaCooldowns({ warningHandler });
+
+		expect(cleared).toBe(0);
+		expect(
+			manager.getAccount("cooldown@example.com")?.quotaExhaustedUntil,
+		).toBe(originalCooldown);
+		expect(warningHandler).toHaveBeenCalledTimes(1);
+		expect(mocks.saveStorage).not.toHaveBeenCalled();
+	});
+});
+
 describe("AccountManager activation freshness", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();

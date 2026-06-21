@@ -201,6 +201,21 @@ export function getMaxUsedPercent(
 	return Math.max(...candidates);
 }
 
+export function isFreshUsageHealthyForQuotaCooldown(
+	usage: CodexUsageSnapshot | undefined,
+	maxUsedPercent = 99.5,
+): boolean {
+	const windows = [usage?.primary, usage?.secondary];
+	return windows.every(
+		(window) =>
+			window !== undefined &&
+			typeof window.usedPercent === "number" &&
+			window.usedPercent < maxUsedPercent &&
+			window.allowed !== false &&
+			window.limitReached !== true,
+	);
+}
+
 export function getWeeklyResetAt(
 	usage?: CodexUsageSnapshot,
 ): number | undefined {

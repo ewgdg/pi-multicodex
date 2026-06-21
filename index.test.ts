@@ -571,6 +571,7 @@ describe("manual account selection", () => {
 		let activateCalled = false;
 		let headerEmail: string | undefined;
 
+		const reconcileQuotaCooldowns = vi.fn();
 		const accountManager = {
 			waitUntilReady: async () => {},
 			syncImportedOpenAICodexAuth: async () => false,
@@ -582,6 +583,7 @@ describe("manual account selection", () => {
 				activateCalled = true;
 				return undefined;
 			},
+			reconcileQuotaCooldowns,
 			ensureValidToken: async () => "active-token",
 			handleQuotaExceeded: async () => {},
 		} as unknown as AccountManager;
@@ -617,6 +619,7 @@ describe("manual account selection", () => {
 		}
 
 		expect(activateCalled).toBe(false);
+		expect(reconcileQuotaCooldowns).not.toHaveBeenCalled();
 		expect(headerEmail).toBe("active@example.com");
 	});
 
@@ -671,6 +674,65 @@ describe("manual account selection", () => {
 
 		expect(cleared).toBe(true);
 		expect(headerEmail).toBe("auto@example.com");
+	});
+
+	it("reconciles quota cooldowns only after normal selection finds no account", async () => {
+		const reconciled = { current: false };
+		const active = makeAccount("reconciled@example.com");
+		let headerEmail: string | undefined;
+		const activateBestAccount = vi.fn(async () => undefined);
+		const reconcileQuotaCooldowns = vi.fn(async () => {
+			reconciled.current = true;
+			return 1;
+		});
+
+		const accountManager = {
+			waitUntilReady: async () => {},
+			syncImportedOpenAICodexAuth: async () => false,
+			getAvailableManualAccount: () => undefined,
+			hasManualAccount: () => false,
+			clearManualAccount: () => {},
+			getAvailableActiveAccount: () =>
+				reconciled.current ? active : undefined,
+			activateBestAccount,
+			reconcileQuotaCooldowns,
+			ensureValidToken: async () => "reconciled-token",
+			handleQuotaExceeded: async () => {},
+		} as unknown as AccountManager;
+
+		const baseProvider = {
+			streamSimple: (
+				model: { headers?: Record<string, string> },
+				_context: unknown,
+				_options?: unknown,
+			) => {
+				headerEmail = model.headers?.["X-Multicodex-Account"];
+				async function* inner() {
+					yield { type: "done" };
+				}
+				return inner() as unknown as AsyncIterable<unknown>;
+			},
+		};
+
+		const stream = createStreamWrapper(
+			accountManager,
+			baseProvider as unknown as BaseProvider,
+		)(
+			{
+				id: "test",
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+			} as StreamModel,
+			{} as StreamContext,
+		);
+
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect(activateBestAccount).toHaveBeenCalledTimes(1);
+		expect(reconcileQuotaCooldowns).toHaveBeenCalledTimes(1);
+		expect(headerEmail).toBe("reconciled@example.com");
 	});
 
 	it("clears manual on quota and retries with auto account", async () => {

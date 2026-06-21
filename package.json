@@ -53,7 +53,8 @@
 	],
 	"scripts": {
 		"lint": "biome check .",
-		"test": "vitest run -c vitest.config.ts",
+		"test": "node scripts/run-vitest.mjs",
+		"typecheck": "tsgo -p tsconfig.json",
 		"tsgo": "tsgo -p tsconfig.json",
 		"generate:schema": "bun scripts/generate-schema.ts",
 		"check": "pnpm lint && pnpm tsgo && pnpm test",

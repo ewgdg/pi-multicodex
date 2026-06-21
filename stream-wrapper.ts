@@ -41,30 +41,46 @@ export function createStreamWrapper(
 			try {
 				await accountManager.waitUntilReady();
 				const excludedEmails = new Set<string>();
-				for (let attempt = 0; attempt <= MAX_ROTATION_RETRIES; attempt++) {
+				const selectAccount = async () => {
 					const now = Date.now();
 					const manual = accountManager.getAvailableManualAccount({
 						excludeEmails: excludedEmails,
 						now,
 					});
-					const usingManual = Boolean(manual);
-					let account = manual;
-					if (!account) {
-						if (accountManager.hasManualAccount()) {
-							accountManager.clearManualAccount();
-						}
-						// Keep the session's active account sticky so provider-side prompt
-						// cache stays warm across turns. Re-rank only when active is unusable.
-						account = accountManager.getAvailableActiveAccount({
-							excludeEmails: excludedEmails,
-							now,
-						});
+					if (manual) {
+						return { account: manual, usingManual: true };
 					}
+					if (accountManager.hasManualAccount()) {
+						accountManager.clearManualAccount();
+					}
+					// Keep the session's active account sticky so provider-side prompt
+					// cache stays warm across turns. Re-rank only when active is unusable.
+					const active = accountManager.getAvailableActiveAccount({
+						excludeEmails: excludedEmails,
+						now,
+					});
+					if (active) {
+						return { account: active, usingManual: false };
+					}
+					return {
+						account: await accountManager.activateBestAccount({
+							excludeEmails: excludedEmails,
+							signal: options?.signal,
+						}),
+						usingManual: false,
+					};
+				};
+
+				for (let attempt = 0; attempt <= MAX_ROTATION_RETRIES; attempt++) {
+					let { account, usingManual } = await selectAccount();
 					if (!account) {
-						account = await accountManager.activateBestAccount({
+						const cleared = await accountManager.reconcileQuotaCooldowns({
 							excludeEmails: excludedEmails,
 							signal: options?.signal,
 						});
+						if (cleared > 0) {
+							({ account, usingManual } = await selectAccount());
+						}
 					}
 					if (!account) {
 						throw new Error(

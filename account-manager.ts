@@ -15,7 +15,11 @@ import {
 	type StorageData,
 	saveStorage,
 } from "./storage";
-import { type CodexUsageSnapshot, getQuotaCooldownResetAt } from "./usage";
+import {
+	type CodexUsageSnapshot,
+	getQuotaCooldownResetAt,
+	isFreshUsageHealthyForQuotaCooldown,
+} from "./usage";
 import { fetchCodexUsage } from "./usage-client";
 
 const USAGE_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -305,6 +309,42 @@ export class AccountManager {
 				cleared += 1;
 			}
 		}
+		if (cleared > 0) {
+			this.save();
+			this.notifyStateChanged();
+		}
+		return cleared;
+	}
+
+	async reconcileQuotaCooldowns(options?: {
+		excludeEmails?: Set<string>;
+		signal?: AbortSignal;
+		warningHandler?: WarningHandler;
+	}): Promise<number> {
+		const now = Date.now();
+		let cleared = 0;
+
+		for (const account of this.getAccounts()) {
+			if (!account.quotaExhaustedUntil) continue;
+			if (options?.excludeEmails?.has(account.email)) continue;
+
+			if (account.quotaExhaustedUntil <= now) {
+				account.quotaExhaustedUntil = undefined;
+				cleared += 1;
+				continue;
+			}
+
+			const usage = await this.refreshUsageForAccount(account, {
+				force: true,
+				signal: options?.signal,
+				warningHandler: options?.warningHandler,
+			});
+			if (isFreshUsageHealthyForQuotaCooldown(usage)) {
+				account.quotaExhaustedUntil = undefined;
+				cleared += 1;
+			}
+		}
+
 		if (cleared > 0) {
 			this.save();
 			this.notifyStateChanged();
