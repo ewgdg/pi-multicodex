@@ -14,6 +14,7 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 	const statusController = createUsageStatusController(accountManager);
 	let activeSessionKey: string | undefined;
 	let lifecycleVersion = 0;
+	let managedStartupInitialized = false;
 
 	function getSessionKey(ctx: ExtensionContext): string | undefined {
 		try {
@@ -40,6 +41,17 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		ctx.ui.notify(message, "warning");
 	}
 
+	function isManagedModel(model: ExtensionContext["model"]): boolean {
+		return model?.provider === PROVIDER_ID;
+	}
+
+	function getSelectedModel(event: unknown): ExtensionContext["model"] {
+		if (event && typeof event === "object" && "model" in event) {
+			return event.model as ExtensionContext["model"];
+		}
+		return undefined;
+	}
+
 	function notifyIfCurrent(
 		ctx: ExtensionContext,
 		version: number,
@@ -47,6 +59,34 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 	): void {
 		if (isCurrentContext(ctx, version)) {
 			notifyWarning(ctx, message);
+		}
+	}
+
+	async function initializeManagedStartup(
+		ctx: ExtensionContext,
+		version: number,
+		reason: SessionStartEvent["reason"],
+	): Promise<void> {
+		const rotationContext = {
+			ctx,
+			reason,
+			isCurrent: () => isCurrentContext(ctx, version),
+		};
+		if (reason === "new") {
+			await handleNewSessionSwitch(
+				accountManager,
+				(msg) => notifyIfCurrent(ctx, version, msg),
+				rotationContext,
+			);
+		} else {
+			await handleSessionStart(
+				accountManager,
+				(msg) => notifyIfCurrent(ctx, version, msg),
+				rotationContext,
+			);
+		}
+		if (isCurrentContext(ctx, version)) {
+			managedStartupInitialized = true;
 		}
 	}
 
@@ -62,25 +102,14 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		async (event: SessionStartEvent, ctx: ExtensionContext) => {
 			activeSessionKey = getSessionKey(ctx);
 			lifecycleVersion += 1;
+			managedStartupInitialized = false;
 			const version = lifecycleVersion;
 			accountManager.resetSessionWarnings();
-			const rotationContext = {
-				ctx,
-				reason: event.reason,
-				isCurrent: () => isCurrentContext(ctx, version),
-			};
-			if (event.reason === "new") {
-				await handleNewSessionSwitch(
-					accountManager,
-					(msg) => notifyIfCurrent(ctx, version, msg),
-					rotationContext,
-				);
-			} else {
-				await handleSessionStart(
-					accountManager,
-					(msg) => notifyIfCurrent(ctx, version, msg),
-					rotationContext,
-				);
+			// Never touch account rotation while another provider is active. Registering
+			// MultiCodex makes Codex available, but it must not pull non-Codex sessions
+			// back to Codex through startup side effects.
+			if (isManagedModel(ctx.model)) {
+				await initializeManagedStartup(ctx, version, event.reason);
 			}
 			if (!isCurrentContext(ctx, version)) return;
 			statusController.startAutoRefresh();
@@ -95,15 +124,22 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		void statusController.refreshFor(ctx);
 	});
 
-	pi.on("model_select", (_event: unknown, ctx: ExtensionContext) => {
+	pi.on("model_select", async (event: unknown, ctx: ExtensionContext) => {
 		if (!activeSessionKey || getSessionKey(ctx) !== activeSessionKey) return;
+		const version = lifecycleVersion;
 		statusController.scheduleModelSelectRefresh(ctx);
+		const selectedModel = getSelectedModel(event) ?? ctx.model;
+		if (!isManagedModel(selectedModel) || managedStartupInitialized) return;
+		await initializeManagedStartup(ctx, version, "resume");
+		if (!isCurrentContext(ctx, version)) return;
+		await statusController.refreshFor(ctx);
 	});
 
 	pi.on("session_shutdown", (_event: unknown, ctx: ExtensionContext) => {
 		if (!activeSessionKey || getSessionKey(ctx) !== activeSessionKey) return;
 		lifecycleVersion += 1;
 		activeSessionKey = undefined;
+		managedStartupInitialized = false;
 		statusController.stopAutoRefresh(ctx);
 	});
 }

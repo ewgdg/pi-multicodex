@@ -45,9 +45,13 @@ vi.mock("./status", () => ({
 
 import multicodexExtension from "./extension";
 
-function createMockContext(sessionKey = "session-a") {
+function createMockContext(
+	sessionKey = "session-a",
+	provider = "openai-codex",
+) {
 	return {
 		ui: { notify: vi.fn() },
+		model: { provider },
 		sessionManager: {
 			getSessionFile: () => sessionKey,
 			getSessionId: () => sessionKey,
@@ -122,6 +126,53 @@ describe("multicodexExtension", () => {
 		release();
 		await running;
 		expect(mocks.statusLoadPreferences).toHaveBeenCalledOnce();
+	});
+
+	it("skips managed startup when current model is not codex", async () => {
+		const handlers = new Map<string, (...args: unknown[]) => void>();
+		const ctx = createMockContext("session-a", "anthropic");
+
+		multicodexExtension({
+			registerProvider: vi.fn(),
+			on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+				handlers.set(event, handler);
+			}),
+		} as never);
+
+		await handlers.get("session_start")?.({ reason: "resume" }, ctx as never);
+
+		expect(mocks.resetSessionWarnings).toHaveBeenCalledOnce();
+		expect(mocks.handleSessionStart).not.toHaveBeenCalled();
+		expect(mocks.handleNewSessionSwitch).not.toHaveBeenCalled();
+		expect(mocks.statusStartAutoRefresh).toHaveBeenCalledOnce();
+		expect(mocks.statusRefreshFor).toHaveBeenCalledWith(ctx);
+	});
+
+	it("initializes managed startup when user later selects codex", async () => {
+		const handlers = new Map<string, (...args: unknown[]) => void>();
+		const ctx = createMockContext("session-a", "anthropic");
+		const codexModel = { provider: "openai-codex" };
+
+		multicodexExtension({
+			registerProvider: vi.fn(),
+			on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+				handlers.set(event, handler);
+			}),
+		} as never);
+
+		await handlers.get("session_start")?.({ reason: "resume" }, ctx as never);
+		mocks.statusRefreshFor.mockClear();
+		ctx.model = codexModel;
+
+		await handlers.get("model_select")?.(
+			{ type: "model_select", model: codexModel, source: "set" },
+			ctx as never,
+		);
+
+		expect(mocks.statusScheduleModelSelectRefresh).toHaveBeenCalledWith(ctx);
+		expect(mocks.handleSessionStart).toHaveBeenCalledOnce();
+		expect(mocks.handleNewSessionSwitch).not.toHaveBeenCalled();
+		expect(mocks.statusRefreshFor).toHaveBeenCalledWith(ctx);
 	});
 
 	it("does not resume startup side effects after session shutdown", async () => {
