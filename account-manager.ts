@@ -2,13 +2,13 @@ import {
 	type OAuthCredentials,
 	refreshOpenAICodexToken,
 } from "@earendil-works/pi-ai/oauth";
-import { normalizeUnknownError } from "pi-provider-utils/streams";
 import { loadImportedOpenAICodexAuth } from "./auth";
 import {
 	type CacheAffinityContext,
 	isAccountAvailable,
 	pickBestAccount,
 } from "./selection";
+import { normalizeUnknownError } from "./shared/streams";
 import {
 	type Account,
 	loadStorage,

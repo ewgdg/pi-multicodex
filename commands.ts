@@ -15,10 +15,10 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { getAgentSettingsPath } from "pi-provider-utils/agent-paths";
-import { normalizeUnknownError } from "pi-provider-utils/streams";
 import type { AccountManager } from "./account-manager";
 import { openLoginInBrowser } from "./browser";
+import { getAgentSettingsPath } from "./shared/agent-paths";
+import { normalizeUnknownError } from "./shared/streams";
 import {
 	type createUsageStatusController,
 	formatUsageSummaryText,

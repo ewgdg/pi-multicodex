@@ -10,16 +10,16 @@ The current codebase is organized around these responsibilities:
 
 - `provider.ts`
   - overrides the normal `openai-codex` provider path
-  - mirrors Codex models through `@victor-software-house/pi-provider-utils/providers`
+  - mirrors Codex models directly from `@earendil-works/pi-ai`
   - installs the managed stream wrapper
 - `stream-wrapper.ts`
   - account selection, retry, and quota-rotation path during streaming
-  - uses shared stream and abort primitives from `@victor-software-house/pi-provider-utils/streams`
+  - uses local stream and abort primitives from `shared/streams.ts`
 - `account-manager.ts`
   - managed account storage, token refresh, usage cache, activation logic, auth import sync
 - `auth.ts`
   - reads pi's `~/.pi/agent/auth.json` and extracts importable `openai-codex` OAuth state
-  - resolves agent paths through `@victor-software-house/pi-provider-utils/agent-paths`
+  - resolves agent paths through `shared/agent-paths.ts`
 - `status.ts`
   - footer rendering with severity-based color tiers, footer settings persistence, settings panel with live preview, and footer refresh behavior
   - uses shared agent-path JSON helpers for `settings.json` access
@@ -29,7 +29,7 @@ The current codebase is organized around these responsibilities:
   - session-start and session-switch refresh behavior
 - `storage.ts`
   - persisted account state in `~/.pi/agent/codex-accounts.json`
-  - resolves storage path through `@victor-software-house/pi-provider-utils/agent-paths`
+  - resolves storage path through `shared/agent-paths.ts`
 - `selection.ts`
   - account selection logic (untouched preference, earliest weekly reset, random fallback)
 - `usage.ts` / `usage-client.ts`
@@ -39,7 +39,7 @@ The current codebase is organized around these responsibilities:
 - `browser.ts`
   - login URL opening in browser
 - `abort-utils.ts`
-  - linked abort controller for stream cancellation
+  - compatibility re-export for linked abort controller helpers from `shared/streams.ts`
 
 ## Current product behavior
 
@@ -56,7 +56,7 @@ The current codebase is organized around these responsibilities:
   - `/multicodex reset [manual|quota|all]`
   - `/multicodex help`
 - Footer settings are persisted in `~/.pi/agent/settings.json` under `pi-multicodex`.
-- Shared provider mirroring, stream primitives, and agent-path helpers come from `@victor-software-house/pi-provider-utils`.
+- Stream primitives and agent-path helpers are local under `shared/` so the package stays self-contained.
 - Rotation criteria are still hard-coded.
 
 ## Active roadmap priorities

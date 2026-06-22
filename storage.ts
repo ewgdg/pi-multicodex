@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentPath } from "pi-provider-utils/agent-paths";
 import { z } from "zod";
+import { getAgentPath } from "./shared/agent-paths";
 
 // ---------------------------------------------------------------------------
 // Schema

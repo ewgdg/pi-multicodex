@@ -10,13 +10,13 @@ import {
 	SettingsList,
 	Text,
 } from "@earendil-works/pi-tui";
+import type { AccountManager } from "./account-manager";
+import { PROVIDER_ID } from "./provider";
 import {
 	getAgentSettingsPath,
 	readJsonObjectFileAsync,
 	writeJsonObjectFileAsync,
-} from "pi-provider-utils/agent-paths";
-import type { AccountManager } from "./account-manager";
-import { PROVIDER_ID } from "./provider";
+} from "./shared/agent-paths";
 import { type CodexUsageSnapshot, formatResetAt } from "./usage";
 
 const STATUS_KEY = "multicodex-usage";
