@@ -1,4 +1,4 @@
-# @victor-software-house/pi-multicodex
+# pi-multicodex
 
 ![MultiCodex main panel](./assets/multicodex-main.png)
 
@@ -6,12 +6,32 @@ MultiCodex is a [pi](https://github.com/badlogic/pi-mono) extension that manages
 
 You add your Codex accounts once. After that, MultiCodex picks the best available account at session start and keeps that account sticky to preserve provider prompt-cache affinity. When one account runs dry mid-session, it switches to another and retries — no manual intervention needed.
 
+## Provenance
+
+This is a fork of [victor-software-house/pi-multicodex](https://github.com/victor-software-house/pi-multicodex), which in turn builds on [kim0/pi-multicodex](https://github.com/kim0/pi-multicodex) — the original extension that introduced Codex account rotation for pi.
+
+The upstream (`victor-software-house/pi-multicodex`) is no longer maintained. This fork continues active development under `@ewgdg/pi-multicodex`.
+
+## What's different in this fork
+
+- **Renamed package.** Published as `@ewgdg/pi-multicodex`.
+- **Self-contained.** Removed `pi-provider-utils` dependency — runtime utility seams live under `shared/` so the package works without pulling in extra dependencies.
+- **Non-Codex model handling.** Skips MultiCodex startup entirely when the session model isn't a Codex model — no spurious errors or footer clutter.
+- **Ongoing pi version compatibility.** Updated through pi 0.74+ scope changes and session event interfaces.
+
+### Rotation policy
+
+- **Cache-aware rotation affinity.** Accounts with recent large-context sessions score higher, keeping prompt caches warm across turns.
+- **Tier-weighted rotation scoring.** Plan tier (`free`, `plus`, `prolite`, `pro`) weighted into selection score so higher-capacity accounts carry more weight — reduces the chance of hitting the wall mid-session by preferring accounts with more quota headroom.
+- **Weekly reset pressure prioritization.** Accounts nearing their weekly reset with remaining quota score higher — uses allowance before it expires rather than letting it roll over to waste.
+- **Stale quota cooldown reconciliation.** Cleans up cooldowns that outlived their reset window automatically.
+
 ## Getting started
 
 Install from npm:
 
 ```bash
-pi install npm:@victor-software-house/pi-multicodex
+pi install npm:@ewgdg/pi-multicodex
 ```
 
 Restart pi. That is all you need — MultiCodex takes over the normal `openai-codex` provider path and auto-imports any Codex auth you have already set up in pi.
@@ -118,43 +138,3 @@ MultiCodex stores all data locally under `~/.pi/agent/`:
 
 No data is sent anywhere except to the Codex API endpoints for auth refresh and usage queries.
 
-## Release process
-
-Releases are automated. Push a conventional commit to `main` and GitHub Actions handles versioning, changelog, npm publishing (via trusted publishing), and GitHub releases.
-
-Local push protection via `lefthook` runs the same checks as CI before every push.
-
-## Roadmap
-
-See [ROADMAP.md](ROADMAP.md) for planned work including configurable rotation settings, a shared controller architecture, and immediate footer persistence.
-
-## Prior art and how this project differs
-
-This extension builds on ideas from two earlier pi extensions. Both deserve credit for establishing the patterns that made this project possible.
-
-### [kim0/pi-multicodex](https://github.com/kim0/pi-multicodex)
-
-The original MultiCodex extension by [kim0](https://github.com/kim0). It introduced the core concept: manage multiple Codex OAuth accounts and rotate between them on quota failures. The original shipped as a single `index.ts` file (~990 lines) with three top-level commands (`/multicodex-login`, `/multicodex-use`, `/multicodex-status`), a stream wrapper for transparent retries, and account selection logic that prefers untouched accounts and earliest weekly resets.
-
-This fork diverged significantly:
-
-- **Modular architecture.** Split into 16 focused modules (~2,400 lines of runtime code, ~1,200 lines of tests) instead of one monolithic file.
-- **Command family.** One `/multicodex` command with subcommands and dynamic autocomplete, replacing three separate top-level commands.
-- **Account removal.** In-session account deletion from the picker via `Backspace` with confirmation — the original had no way to remove accounts without editing the JSON file.
-- **Non-interactive mode.** All inspection and recovery subcommands (`show`, `verify`, `path`, `reset`, `help`) work without a UI panel.
-- **Auth import.** Automatically imports pi's stored `openai-codex` credentials when they change, so existing pi logins work without re-entering them.
-- **Token refresh.** Proactively refreshes OAuth tokens before expiry instead of failing on stale credentials.
-- **Automated releases.** semantic-release with npm trusted publishing, commitlint, lefthook pre-push checks, and CI validation on every push.
-
-### [calesennett/pi-codex-usage](https://github.com/calesennett/pi-codex-usage)
-
-A footer-only extension by [calesennett](https://github.com/calesennett) that shows Codex usage windows in the pi status bar. It introduced the idea of a live footer displaying 5-hour and 7-day usage percentages with reset countdowns, and offered two commands to toggle display mode and reset window.
-
-This project incorporated and extended that footer concept:
-
-- **Integrated footer.** The usage footer is part of the rotation extension rather than a separate install, so it always reflects the active rotated account.
-- **More settings.** Five configurable fields (usage mode, reset window, show account, show reset countdown, footer order) compared to two toggles.
-- **Settings panel.** Interactive `SettingsList` modal with live preview instead of separate toggle commands.
-- **Colored segments.** Footer renders usage percentages, separators, and account labels in distinct colors matched to the terminal theme.
-- **Severity-based colors.** Usage percentages shift through four color tiers (green, amber, warning, error) as quota depletes — green above 50% remaining, amber at 50%, warning at 25%, red at 10% or below. The thresholds flip automatically when the display mode is set to "used" instead of "left."
-- **Model-aware display.** Footer clears when switching to non-Codex models and debounces rapid model changes.
