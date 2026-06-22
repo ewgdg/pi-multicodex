@@ -98,9 +98,6 @@
 		"typescript": "^5.9.3",
 		"vitest": "^4.1.0"
 	},
-	"engines": {
-		"node": "^24.17.0"
-	},
 	"dependencies": {
 		"zod": "^4.3.6"
 	}
