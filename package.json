@@ -1,5 +1,5 @@
 {
-	"name": "@victor-software-house/pi-multicodex",
+	"name": "@ewgdg/pi-multicodex",
 	"version": "2.3.1",
 	"description": "Codex account rotation extension for pi",
 	"license": "MIT",
@@ -18,17 +18,17 @@
 		"extensions": [
 			"./index.ts"
 		],
-		"image": "https://raw.githubusercontent.com/victor-software-house/pi-multicodex/main/assets/multicodex-main.png"
+		"image": "https://raw.githubusercontent.com/ewgdg/pi-multicodex/main/assets/multicodex-main.png"
 	},
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/victor-software-house/pi-multicodex.git"
+		"url": "git+https://github.com/ewgdg/pi-multicodex.git"
 	},
-	"homepage": "https://github.com/victor-software-house/pi-multicodex#readme",
+	"homepage": "https://github.com/ewgdg/pi-multicodex#readme",
 	"bugs": {
-		"url": "https://github.com/victor-software-house/pi-multicodex/issues"
+		"url": "https://github.com/ewgdg/pi-multicodex/issues"
 	},
-	"author": "Victor",
+	"author": "ewgdg",
 	"files": [
 		"abort-utils.ts",
 		"account-manager.ts",
@@ -59,8 +59,7 @@
 		"tsgo": "tsgo -p tsconfig.json",
 		"generate:schema": "bun scripts/generate-schema.ts",
 		"check": "pnpm lint && pnpm tsgo && pnpm test",
-		"pack:dry": "npm pack --dry-run",
-		"release:dry": "pnpm exec semantic-release --dry-run"
+		"pack:dry": "npm pack --dry-run"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
@@ -85,16 +84,8 @@
 		"@earendil-works/pi-ai": "^0.74.0",
 		"@earendil-works/pi-coding-agent": "^0.74.0",
 		"@earendil-works/pi-tui": "^0.74.0",
-		"@semantic-release/changelog": "^6.0.3",
-		"@semantic-release/commit-analyzer": "^13.0.1",
-		"@semantic-release/git": "^10.0.1",
-		"@semantic-release/github": "^12.0.6",
-		"@semantic-release/npm": "^13.1.5",
-		"@semantic-release/release-notes-generator": "^14.1.0",
 		"@types/node": "^24.13.2",
 		"@typescript/native-preview": "7.0.0-dev.20260314.1",
-		"conventional-changelog-conventionalcommits": "^9.3.0",
-		"semantic-release": "^25.0.3",
 		"typescript": "^5.9.3",
 		"vitest": "^4.1.0"
 	},
