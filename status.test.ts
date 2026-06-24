@@ -233,6 +233,35 @@ describe("createUsageStatusController", () => {
 			expect.stringContaining("7d:80% left"),
 		);
 	});
+	it("shows reauth warning instead of stale usage for expired active account", async () => {
+		const setStatus = vi.fn();
+		const refreshUsageForAccount = vi.fn();
+		const controller = createUsageStatusController({
+			onStateChange: () => () => undefined,
+			getActiveAccount: () => ({
+				email: "expired@example.com",
+				needsReauth: true,
+			}),
+			getCachedUsage: () => ({
+				primary: { usedPercent: 10, resetAt: 1 },
+				secondary: { usedPercent: 20, resetAt: 2 },
+				fetchedAt: 0,
+			}),
+			refreshUsageForAccount,
+		} as never);
+
+		await controller.refreshFor(createContext({ setStatus }));
+
+		expect(setStatus).toHaveBeenLastCalledWith(
+			"multicodex-usage",
+			expect.stringContaining("Multicodex expired@example.com needs reauth"),
+		);
+		expect(setStatus).not.toHaveBeenLastCalledWith(
+			"multicodex-usage",
+			expect.stringContaining("5h:90% left"),
+		);
+		expect(refreshUsageForAccount).not.toHaveBeenCalled();
+	});
 
 	it("falls back to cached usage when refreshing fails", async () => {
 		const setStatus = vi.fn();

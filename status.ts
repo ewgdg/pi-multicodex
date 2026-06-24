@@ -252,6 +252,24 @@ export function isManagedModel(model: MaybeModel): boolean {
 	return model?.provider === PROVIDER_ID;
 }
 
+function formatUnavailableAccountStatus(
+	ctx: ExtensionContext,
+	account: ReturnType<AccountManager["getActiveAccount"]>,
+): string | undefined {
+	if (!account) {
+		return ctx.ui.theme.fg("warning", "Multicodex no active account");
+	}
+
+	if (account.needsReauth) {
+		return ctx.ui.theme.fg(
+			"warning",
+			`Multicodex ${account.email} needs reauth`,
+		);
+	}
+
+	return undefined;
+}
+
 export function formatActiveAccountStatus(
 	ctx: ExtensionContext,
 	accountEmail: string,
@@ -435,9 +453,11 @@ export function createUsageStatusController(accountManager: AccountManager) {
 			}
 
 			const activeAccount = accountManager.getActiveAccount();
-			if (!activeAccount) {
-				return ctx.ui.theme.fg("warning", "Multicodex no active account");
-			}
+			const unavailableStatus = formatUnavailableAccountStatus(
+				ctx,
+				activeAccount,
+			);
+			if (unavailableStatus || !activeAccount) return unavailableStatus;
 
 			return formatActiveAccountStatus(
 				ctx,
@@ -482,11 +502,11 @@ export function createUsageStatusController(accountManager: AccountManager) {
 			if (isAccountManagerInitializing()) return undefined;
 
 			const account = accountManager.getActiveAccount();
-			if (!account) {
-				ctx.ui.setStatus(
-					STATUS_KEY,
-					ctx.ui.theme.fg("warning", "Multicodex no active account"),
-				);
+			const unavailableStatus = formatUnavailableAccountStatus(ctx, account);
+			if (unavailableStatus || !account) {
+				if (unavailableStatus) {
+					ctx.ui.setStatus(STATUS_KEY, unavailableStatus);
+				}
 				return undefined;
 			}
 			return account;
