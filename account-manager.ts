@@ -2,7 +2,10 @@ import {
 	type OAuthCredentials,
 	refreshOpenAICodexToken,
 } from "@earendil-works/pi-ai/oauth";
-import { loadImportedOpenAICodexAuth } from "./auth";
+import {
+	loadImportedOpenAICodexAuth,
+	watchImportedOpenAICodexAuth,
+} from "./auth";
 import {
 	type CacheAffinityContext,
 	isAccountAvailable,
@@ -25,6 +28,7 @@ import { fetchCodexUsage } from "./usage-client";
 const USAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 const USAGE_REQUEST_TIMEOUT_MS = 10 * 1000;
 const QUOTA_COOLDOWN_MS = 60 * 60 * 1000;
+const PI_AUTH_SYNC_RETRY_DELAYS_MS = [25, 50] as const;
 
 type WarningHandler = (message: string) => void;
 type StateChangeHandler = () => void;
@@ -36,6 +40,19 @@ interface UsageRefreshOptions {
 	warningHandler?: WarningHandler;
 }
 
+interface PiAuthLoadOptions {
+	authFile?: string;
+	shouldApply?: () => boolean;
+	generation?: number;
+	throwOnNonEnoentError?: boolean;
+}
+
+interface PiAuthWatchOptions {
+	authFile?: string;
+	onError?: (error: unknown) => void;
+	shouldApply?: () => boolean;
+}
+
 export class AccountManager {
 	private data: StorageData;
 	private usageCache = new Map<string, CodexUsageSnapshot>();
@@ -45,6 +62,13 @@ export class AccountManager {
 	private initializing = false;
 	private stateChangeHandlers = new Set<StateChangeHandler>();
 	private warnedAuthFailureEmails = new Set<string>();
+	private disposePiAuthWatch?: () => void;
+	private piAuthWatchShouldApply?: () => boolean;
+	private piAuthWatchOnError?: (error: unknown) => void;
+	private piAuthWatchAuthFile?: string;
+	private piAuthWatchSync?: Promise<void>;
+	private piAuthWatchEventQueued = false;
+	private piAuthWatchGeneration = 0;
 	private readyPromise: Promise<void> = Promise.resolve();
 	private readyResolve?: () => void;
 	private initializationToken?: InitializationToken;
@@ -154,7 +178,22 @@ export class AccountManager {
 		return true;
 	}
 
-	private applyCredentials(account: Account, creds: OAuthCredentials): boolean {
+	private credentialsMatch(account: Account, creds: OAuthCredentials): boolean {
+		const accountId =
+			typeof creds.accountId === "string" ? creds.accountId : undefined;
+		return (
+			account.accessToken === creds.access &&
+			account.refreshToken === creds.refresh &&
+			account.expiresAt === creds.expires &&
+			(!accountId || account.accountId === accountId)
+		);
+	}
+
+	private applyCredentials(
+		account: Account,
+		creds: OAuthCredentials,
+		options?: { clearNeedsReauth?: boolean },
+	): boolean {
 		const accountId =
 			typeof creds.accountId === "string" ? creds.accountId : undefined;
 		let changed = false;
@@ -174,7 +213,7 @@ export class AccountManager {
 			account.accountId = accountId;
 			changed = true;
 		}
-		if (account.needsReauth) {
+		if (options?.clearNeedsReauth !== false && account.needsReauth) {
 			account.needsReauth = undefined;
 			this.warnedAuthFailureEmails.delete(account.email);
 			changed = true;
@@ -182,10 +221,14 @@ export class AccountManager {
 		return changed;
 	}
 
-	addOrUpdateAccount(email: string, creds: OAuthCredentials): Account {
+	addOrUpdateAccount(
+		email: string,
+		creds: OAuthCredentials,
+		options?: { clearNeedsReauth?: boolean },
+	): Account {
 		const existing = this.data.accounts.find((a) => a.email === email);
 		if (existing) {
-			const changed = this.applyCredentials(existing, creds);
+			const changed = this.applyCredentials(existing, creds, options);
 			if (changed) {
 				this.save();
 				this.notifyStateChanged();
@@ -253,19 +296,192 @@ export class AccountManager {
 	 * Read pi's openai-codex auth from auth.json and merge it into the
 	 * normal managed account pool so pi-login accounts behave like all others.
 	 */
-	async loadPiAuth(options?: { shouldApply?: () => boolean }): Promise<void> {
-		const imported = await loadImportedOpenAICodexAuth();
-		if (!imported || options?.shouldApply?.() === false) return;
+	private isPiAuthLoadAllowed(options?: PiAuthLoadOptions): boolean {
+		return (
+			(options?.generation === undefined ||
+				options.generation === this.piAuthWatchGeneration) &&
+			options?.shouldApply?.() !== false
+		);
+	}
 
+	private isPiAuthWatchCurrent(
+		generation: number,
+		shouldApply?: () => boolean,
+	): boolean {
+		return (
+			generation === this.piAuthWatchGeneration && shouldApply?.() !== false
+		);
+	}
+
+	private async loadPiAuthInternal(
+		options?: PiAuthLoadOptions,
+	): Promise<boolean> {
+		if (!this.isPiAuthLoadAllowed(options)) return false;
+		const imported = await loadImportedOpenAICodexAuth({
+			...(options?.authFile ? { authFile: options.authFile } : {}),
+			...(options?.throwOnNonEnoentError
+				? { throwOnNonEnoentError: true }
+				: {}),
+		});
+		if (!this.isPiAuthLoadAllowed(options) || !imported) return false;
+
+		const existing = this.data.accounts.find(
+			(account) => account.email === imported.identifier,
+		);
 		const account = this.addOrUpdateAccount(
 			imported.identifier,
 			imported.credentials,
+			{
+				clearNeedsReauth:
+					!existing || !this.credentialsMatch(existing, imported.credentials),
+			},
 		);
 		if (!account.piAuth) {
 			account.piAuth = true;
 			this.save();
 			this.notifyStateChanged();
 		}
+		return true;
+	}
+
+	async loadPiAuth(options?: PiAuthLoadOptions): Promise<void> {
+		await this.loadPiAuthInternal(options);
+	}
+
+	private reportPiAuthWatchError(
+		generation: number,
+		error: unknown,
+		shouldApply?: () => boolean,
+		onError?: (error: unknown) => void,
+	): void {
+		if (!this.isPiAuthWatchCurrent(generation, shouldApply)) return;
+		(onError ?? this.piAuthWatchOnError)?.(error);
+	}
+
+	private retirePiAuthWatch(generation: number): void {
+		if (generation !== this.piAuthWatchGeneration) return;
+		this.disposePiAuthWatch?.();
+		this.disposePiAuthWatch = undefined;
+		this.piAuthWatchGeneration += 1;
+		this.piAuthWatchEventQueued = false;
+		this.piAuthWatchSync = undefined;
+		this.piAuthWatchShouldApply = undefined;
+		this.piAuthWatchOnError = undefined;
+		this.piAuthWatchAuthFile = undefined;
+	}
+
+	private handlePiAuthWatchFailure(generation: number, error: unknown): void {
+		const shouldApply = this.piAuthWatchShouldApply;
+		const onError = this.piAuthWatchOnError;
+		try {
+			this.reportPiAuthWatchError(generation, error, shouldApply, onError);
+		} finally {
+			this.retirePiAuthWatch(generation);
+		}
+	}
+
+	private async syncPiAuthAfterEvent(options: {
+		generation: number;
+		authFile?: string;
+		shouldApply?: () => boolean;
+	}): Promise<void> {
+		for (let attempt = 0; ; attempt += 1) {
+			if (!this.isPiAuthWatchCurrent(options.generation, options.shouldApply)) {
+				return;
+			}
+			try {
+				const loaded = await this.loadPiAuthInternal({
+					authFile: options.authFile,
+					generation: options.generation,
+					shouldApply: options.shouldApply,
+					throwOnNonEnoentError: true,
+				});
+				if (
+					!this.isPiAuthWatchCurrent(options.generation, options.shouldApply) ||
+					loaded ||
+					attempt >= PI_AUTH_SYNC_RETRY_DELAYS_MS.length
+				) {
+					return;
+				}
+			} catch (error) {
+				if (
+					!this.isPiAuthWatchCurrent(options.generation, options.shouldApply)
+				) {
+					return;
+				}
+				if (attempt >= PI_AUTH_SYNC_RETRY_DELAYS_MS.length) throw error;
+			}
+			if (!this.isPiAuthWatchCurrent(options.generation, options.shouldApply)) {
+				return;
+			}
+			const delay = PI_AUTH_SYNC_RETRY_DELAYS_MS[attempt];
+			await new Promise<void>((resolve) => setTimeout(resolve, delay));
+		}
+	}
+
+	private handlePiAuthWatchEvent(generation: number): void {
+		if (generation !== this.piAuthWatchGeneration) return;
+		if (this.piAuthWatchSync) {
+			this.piAuthWatchEventQueued = true;
+			return;
+		}
+
+		const shouldApply = this.piAuthWatchShouldApply;
+		const onError = this.piAuthWatchOnError;
+		const authFile = this.piAuthWatchAuthFile;
+		let tracked: Promise<void>;
+		tracked = this.syncPiAuthAfterEvent({
+			generation,
+			authFile,
+			shouldApply,
+		})
+			.catch((error) => {
+				this.reportPiAuthWatchError(generation, error, shouldApply, onError);
+			})
+			.finally(() => {
+				if (this.piAuthWatchSync !== tracked) return;
+				this.piAuthWatchSync = undefined;
+				if (
+					this.piAuthWatchEventQueued &&
+					generation === this.piAuthWatchGeneration &&
+					this.disposePiAuthWatch &&
+					shouldApply?.() !== false
+				) {
+					this.piAuthWatchEventQueued = false;
+					this.handlePiAuthWatchEvent(generation);
+				} else {
+					this.piAuthWatchEventQueued = false;
+				}
+			});
+		this.piAuthWatchSync = tracked;
+	}
+
+	startPiAuthWatch(options?: PiAuthWatchOptions): void {
+		this.piAuthWatchShouldApply = options?.shouldApply;
+		this.piAuthWatchOnError = options?.onError;
+		this.piAuthWatchAuthFile = options?.authFile;
+		if (this.disposePiAuthWatch) return;
+
+		const generation = ++this.piAuthWatchGeneration;
+		const dispose = watchImportedOpenAICodexAuth(
+			() => this.handlePiAuthWatchEvent(generation),
+			{
+				authFile: options?.authFile,
+				onError: (error) => this.handlePiAuthWatchFailure(generation, error),
+			},
+		);
+		if (dispose) this.disposePiAuthWatch = dispose;
+	}
+
+	stopPiAuthWatch(): void {
+		this.piAuthWatchGeneration += 1;
+		this.piAuthWatchEventQueued = false;
+		this.disposePiAuthWatch?.();
+		this.disposePiAuthWatch = undefined;
+		this.piAuthWatchShouldApply = undefined;
+		this.piAuthWatchOnError = undefined;
+		this.piAuthWatchAuthFile = undefined;
+		this.piAuthWatchSync = undefined;
 	}
 
 	getAvailableManualAccount(options?: {

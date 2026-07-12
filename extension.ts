@@ -7,6 +7,7 @@ import { AccountManager } from "./account-manager";
 import { registerCommands } from "./commands";
 import { handleNewSessionSwitch, handleSessionStart } from "./hooks";
 import { buildMulticodexProviderConfig, PROVIDER_ID } from "./provider";
+import { normalizeUnknownError } from "./shared/streams";
 import { createUsageStatusController } from "./status";
 
 export default function multicodexExtension(pi: ExtensionAPI) {
@@ -14,6 +15,7 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 	const statusController = createUsageStatusController(accountManager);
 	let activeSessionKey: string | undefined;
 	let lifecycleVersion = 0;
+	let activeModelProvider: string | undefined;
 	let managedStartupInitialized = false;
 
 	function getSessionKey(ctx: ExtensionContext): string | undefined {
@@ -34,6 +36,17 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 			Boolean(sessionKey) &&
 			activeSessionKey === sessionKey &&
 			lifecycleVersion === version
+		);
+	}
+
+	function isCurrentManagedContext(
+		ctx: ExtensionContext,
+		version: number,
+	): boolean {
+		return (
+			isCurrentContext(ctx, version) &&
+			activeModelProvider === PROVIDER_ID &&
+			isManagedModel(ctx.model)
 		);
 	}
 
@@ -62,6 +75,19 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		}
 	}
 
+	function notifyManagedWarningIfCurrent(
+		ctx: ExtensionContext,
+		version: number,
+		error: unknown,
+	): void {
+		if (isCurrentManagedContext(ctx, version)) {
+			notifyWarning(
+				ctx,
+				`Multicodex: failed to sync pi auth: ${normalizeUnknownError(error)}`,
+			);
+		}
+	}
+
 	async function initializeManagedStartup(
 		ctx: ExtensionContext,
 		version: number,
@@ -70,7 +96,7 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		const rotationContext = {
 			ctx,
 			reason,
-			isCurrent: () => isCurrentContext(ctx, version),
+			isCurrent: () => isCurrentManagedContext(ctx, version),
 		};
 		if (reason === "new") {
 			await handleNewSessionSwitch(
@@ -85,7 +111,7 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 				rotationContext,
 			);
 		}
-		if (isCurrentContext(ctx, version)) {
+		if (isCurrentManagedContext(ctx, version)) {
 			managedStartupInitialized = true;
 		}
 	}
@@ -101,6 +127,7 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		"session_start",
 		async (event: SessionStartEvent, ctx: ExtensionContext) => {
 			activeSessionKey = getSessionKey(ctx);
+			activeModelProvider = ctx.model?.provider;
 			lifecycleVersion += 1;
 			managedStartupInitialized = false;
 			const version = lifecycleVersion;
@@ -109,7 +136,14 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 			// MultiCodex makes Codex available, but it must not pull non-Codex sessions
 			// back to Codex through startup side effects.
 			if (isManagedModel(ctx.model)) {
+				accountManager.startPiAuthWatch({
+					shouldApply: () => isCurrentManagedContext(ctx, version),
+					onError: (error) =>
+						notifyManagedWarningIfCurrent(ctx, version, error),
+				});
 				await initializeManagedStartup(ctx, version, event.reason);
+			} else {
+				accountManager.stopPiAuthWatch();
 			}
 			if (!isCurrentContext(ctx, version)) return;
 			statusController.startAutoRefresh();
@@ -129,7 +163,16 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		const version = lifecycleVersion;
 		statusController.scheduleModelSelectRefresh(ctx);
 		const selectedModel = getSelectedModel(event) ?? ctx.model;
-		if (!isManagedModel(selectedModel) || managedStartupInitialized) return;
+		activeModelProvider = selectedModel?.provider;
+		if (!isManagedModel(selectedModel)) {
+			accountManager.stopPiAuthWatch();
+			return;
+		}
+		accountManager.startPiAuthWatch({
+			shouldApply: () => isCurrentManagedContext(ctx, version),
+			onError: (error) => notifyManagedWarningIfCurrent(ctx, version, error),
+		});
+		if (managedStartupInitialized) return;
 		await initializeManagedStartup(ctx, version, "resume");
 		if (!isCurrentContext(ctx, version)) return;
 		await statusController.refreshFor(ctx);
@@ -139,7 +182,9 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		if (!activeSessionKey || getSessionKey(ctx) !== activeSessionKey) return;
 		lifecycleVersion += 1;
 		activeSessionKey = undefined;
+		activeModelProvider = undefined;
 		managedStartupInitialized = false;
+		accountManager.stopPiAuthWatch();
 		statusController.stopAutoRefresh(ctx);
 	});
 }

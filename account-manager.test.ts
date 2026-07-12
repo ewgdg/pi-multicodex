@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
 		activeEmail: undefined as string | undefined,
 	},
 	loadImportedOpenAICodexAuth: vi.fn(),
+	watchImportedOpenAICodexAuth: vi.fn(),
 	fetchCodexUsage: vi.fn(),
 	saveStorage: vi.fn(),
 }));
@@ -21,6 +22,7 @@ vi.mock("./storage", () => ({
 
 vi.mock("./auth", () => ({
 	loadImportedOpenAICodexAuth: mocks.loadImportedOpenAICodexAuth,
+	watchImportedOpenAICodexAuth: mocks.watchImportedOpenAICodexAuth,
 }));
 
 vi.mock("@earendil-works/pi-ai/oauth", () => ({
@@ -39,6 +41,8 @@ describe("AccountManager pi auth import", () => {
 		mocks.storageData.accounts = [];
 		mocks.storageData.activeEmail = undefined;
 		mocks.loadImportedOpenAICodexAuth.mockResolvedValue(undefined);
+		mocks.watchImportedOpenAICodexAuth.mockReset();
+		mocks.watchImportedOpenAICodexAuth.mockReturnValue(() => undefined);
 	});
 
 	it("imports pi auth into the managed account pool", async () => {
@@ -132,6 +136,341 @@ describe("AccountManager pi auth import", () => {
 			piAuth: true,
 		});
 		expect(mocks.saveStorage).toHaveBeenCalled();
+	});
+
+	it("clears flagged state when pi login writes new credentials", async () => {
+		mocks.storageData.accounts = [
+			{
+				email: "pi@example.com",
+				accessToken: "stale-access",
+				refreshToken: "stale-refresh",
+				expiresAt: 100,
+				needsReauth: true,
+				piAuth: true,
+			},
+		];
+		mocks.loadImportedOpenAICodexAuth.mockResolvedValue({
+			identifier: "pi@example.com",
+			fingerprint: "new-fingerprint",
+			credentials: {
+				access: "fresh-access",
+				refresh: "fresh-refresh",
+				expires: Date.now() + 3600_000,
+			},
+		});
+
+		const manager = new AccountManager();
+		const account = manager.getAccount("pi@example.com");
+		expect(account).toBeDefined();
+		if (!account) return;
+
+		await manager.loadPiAuth();
+		await expect(manager.ensureValidToken(account)).resolves.toBe(
+			"fresh-access",
+		);
+		expect(account).toMatchObject({
+			accessToken: "fresh-access",
+			refreshToken: "fresh-refresh",
+			needsReauth: undefined,
+		});
+	});
+
+	it("keeps reauth state when pi auth credentials did not change", async () => {
+		const credentials = {
+			access: "stale-access",
+			refresh: "stale-refresh",
+			expires: 100,
+		};
+		mocks.storageData.accounts = [
+			{
+				email: "pi@example.com",
+				accessToken: credentials.access,
+				refreshToken: credentials.refresh,
+				expiresAt: credentials.expires,
+				needsReauth: true,
+				piAuth: true,
+			},
+		];
+		mocks.loadImportedOpenAICodexAuth.mockResolvedValue({
+			identifier: "pi@example.com",
+			fingerprint: "same-fingerprint",
+			credentials,
+		});
+
+		const manager = new AccountManager();
+		await manager.loadPiAuth();
+
+		expect(manager.getAccount("pi@example.com")?.needsReauth).toBe(true);
+	});
+
+	it("syncs pi auth when the auth file watcher reports a login", async () => {
+		mocks.storageData.accounts = [
+			{
+				email: "pi@example.com",
+				accessToken: "stale-access",
+				refreshToken: "stale-refresh",
+				expiresAt: 100,
+				needsReauth: true,
+				piAuth: true,
+			},
+		];
+		mocks.loadImportedOpenAICodexAuth.mockResolvedValue({
+			identifier: "pi@example.com",
+			fingerprint: "new-fingerprint",
+			credentials: {
+				access: "fresh-access",
+				refresh: "fresh-refresh",
+				expires: Date.now() + 3600_000,
+			},
+		});
+
+		let reportLogin: (() => void) | undefined;
+		const dispose = vi.fn();
+		mocks.watchImportedOpenAICodexAuth.mockImplementation((handler) => {
+			reportLogin = handler;
+			return dispose;
+		});
+
+		const manager = new AccountManager();
+		manager.startPiAuthWatch();
+		expect(reportLogin).toBeTypeOf("function");
+		reportLogin?.();
+
+		await vi.waitFor(() => {
+			expect(manager.getAccount("pi@example.com")?.needsReauth).toBeUndefined();
+		});
+		manager.stopPiAuthWatch();
+
+		expect(dispose).toHaveBeenCalledOnce();
+	});
+
+	it("retries transient auth reads after a file event", async () => {
+		mocks.storageData.accounts = [
+			{
+				email: "pi@example.com",
+				accessToken: "stale-access",
+				refreshToken: "stale-refresh",
+				expiresAt: 100,
+				needsReauth: true,
+				piAuth: true,
+			},
+		];
+		mocks.loadImportedOpenAICodexAuth
+			.mockResolvedValueOnce(undefined)
+			.mockResolvedValueOnce({
+				identifier: "pi@example.com",
+				fingerprint: "new-fingerprint",
+				credentials: {
+					access: "fresh-access",
+					refresh: "fresh-refresh",
+					expires: Date.now() + 3600_000,
+				},
+			});
+
+		let reportChange: (() => void) | undefined;
+		mocks.watchImportedOpenAICodexAuth.mockImplementation((handler) => {
+			reportChange = handler;
+			return () => undefined;
+		});
+
+		const manager = new AccountManager();
+		manager.startPiAuthWatch();
+		reportChange?.();
+
+		await vi.waitFor(() => {
+			expect(manager.getAccount("pi@example.com")?.needsReauth).toBeUndefined();
+		});
+		expect(mocks.loadImportedOpenAICodexAuth).toHaveBeenCalledTimes(2);
+		manager.stopPiAuthWatch();
+	});
+
+	it("does not apply a pending watcher load after stop", async () => {
+		const imported = {
+			identifier: "pi@example.com",
+			fingerprint: "new-fingerprint",
+			credentials: {
+				access: "fresh-access",
+				refresh: "fresh-refresh",
+				expires: Date.now() + 3600_000,
+			},
+		};
+		let resolveLoad: (value: typeof imported) => void = () => undefined;
+		const load = new Promise<typeof imported>((resolve) => {
+			resolveLoad = resolve;
+		});
+		mocks.loadImportedOpenAICodexAuth.mockReturnValue(load);
+
+		let reportChange: (() => void) | undefined;
+		mocks.watchImportedOpenAICodexAuth.mockImplementation((handler) => {
+			reportChange = handler;
+			return () => undefined;
+		});
+
+		const manager = new AccountManager();
+		manager.startPiAuthWatch();
+		reportChange?.();
+		expect(mocks.loadImportedOpenAICodexAuth).toHaveBeenCalledOnce();
+
+		manager.stopPiAuthWatch();
+		resolveLoad(imported);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(manager.getAccounts()).toHaveLength(0);
+		expect(mocks.saveStorage).not.toHaveBeenCalled();
+	});
+
+	it("retries watcher setup after a failed start", async () => {
+		const setupError = new Error("watch setup failed");
+		const dispose = vi.fn();
+		const onError = vi.fn();
+		const imported = {
+			identifier: "pi@example.com",
+			fingerprint: "fingerprint",
+			credentials: {
+				access: "access",
+				refresh: "refresh",
+				expires: Date.now() + 3600_000,
+			},
+		};
+		mocks.loadImportedOpenAICodexAuth.mockResolvedValue(imported);
+		let reportChange: (() => void) | undefined;
+		mocks.watchImportedOpenAICodexAuth
+			.mockImplementationOnce((_handler, options) => {
+				options?.onError?.(setupError);
+				return undefined;
+			})
+			.mockImplementationOnce((handler) => {
+				reportChange = handler;
+				return dispose;
+			});
+
+		const manager = new AccountManager();
+		manager.startPiAuthWatch({ onError });
+		expect(onError).toHaveBeenCalledWith(setupError);
+
+		manager.startPiAuthWatch({ onError });
+		reportChange?.();
+		await vi.waitFor(() => {
+			expect(manager.getAccount("pi@example.com")).toBeDefined();
+		});
+		expect(mocks.watchImportedOpenAICodexAuth).toHaveBeenCalledTimes(2);
+		manager.stopPiAuthWatch();
+		expect(dispose).toHaveBeenCalledOnce();
+	});
+
+	it("restarts the auth watcher after a runtime failure", () => {
+		const runtimeError = new Error("watcher stopped");
+		const firstDispose = vi.fn();
+		const secondDispose = vi.fn();
+		let reportRuntimeError: ((error: unknown) => void) | undefined;
+		mocks.watchImportedOpenAICodexAuth
+			.mockImplementationOnce((_handler, options) => {
+				reportRuntimeError = options?.onError;
+				return firstDispose;
+			})
+			.mockReturnValueOnce(secondDispose);
+		const onError = vi.fn();
+
+		const manager = new AccountManager();
+		manager.startPiAuthWatch({ onError });
+		reportRuntimeError?.(runtimeError);
+
+		expect(onError).toHaveBeenCalledWith(runtimeError);
+		expect(firstDispose).toHaveBeenCalledOnce();
+		manager.startPiAuthWatch({ onError });
+		expect(mocks.watchImportedOpenAICodexAuth).toHaveBeenCalledTimes(2);
+
+		manager.stopPiAuthWatch();
+		expect(secondDispose).toHaveBeenCalledOnce();
+	});
+
+	it("reports malformed watcher auth after retry exhaustion", async () => {
+		const malformedAuth = new SyntaxError("Unexpected end of JSON input");
+		mocks.loadImportedOpenAICodexAuth.mockRejectedValue(malformedAuth);
+		let reportChange: (() => void) | undefined;
+		mocks.watchImportedOpenAICodexAuth.mockImplementation((handler) => {
+			reportChange = handler;
+			return () => undefined;
+		});
+		const onError = vi.fn();
+
+		const manager = new AccountManager();
+		manager.startPiAuthWatch({ onError });
+		reportChange?.();
+
+		await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(malformedAuth));
+		expect(mocks.loadImportedOpenAICodexAuth).toHaveBeenCalledTimes(3);
+		expect(
+			mocks.loadImportedOpenAICodexAuth.mock.calls.every(
+				([options]) => options?.throwOnNonEnoentError === true,
+			),
+		).toBe(true);
+		manager.stopPiAuthWatch();
+	});
+
+	it("keeps missing watcher auth quiet after retry exhaustion", async () => {
+		mocks.loadImportedOpenAICodexAuth.mockResolvedValue(undefined);
+		let reportChange: (() => void) | undefined;
+		mocks.watchImportedOpenAICodexAuth.mockImplementation((handler) => {
+			reportChange = handler;
+			return () => undefined;
+		});
+		const onError = vi.fn();
+
+		const manager = new AccountManager();
+		manager.startPiAuthWatch({ onError });
+		reportChange?.();
+
+		await vi.waitFor(() => {
+			expect(mocks.loadImportedOpenAICodexAuth).toHaveBeenCalledTimes(3);
+		});
+		expect(onError).not.toHaveBeenCalled();
+		manager.stopPiAuthWatch();
+	});
+
+	it("reports watcher sync failures without swallowing them", async () => {
+		const error = new Error("auth read failed");
+		mocks.loadImportedOpenAICodexAuth.mockRejectedValue(error);
+		let reportChange: (() => void) | undefined;
+		mocks.watchImportedOpenAICodexAuth.mockImplementation((handler) => {
+			reportChange = handler;
+			return () => undefined;
+		});
+		const onError = vi.fn();
+
+		const manager = new AccountManager();
+		manager.startPiAuthWatch({ onError });
+		reportChange?.();
+
+		await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(error));
+		manager.stopPiAuthWatch();
+	});
+
+	it("does not report stale watcher sync failures", async () => {
+		const error = new Error("stale auth read failed");
+		mocks.loadImportedOpenAICodexAuth.mockRejectedValue(error);
+		let reportChange: (() => void) | undefined;
+		mocks.watchImportedOpenAICodexAuth.mockImplementation((handler) => {
+			reportChange = handler;
+			return () => undefined;
+		});
+		let current = true;
+		const onError = vi.fn();
+
+		const manager = new AccountManager();
+		manager.startPiAuthWatch({
+			onError,
+			shouldApply: () => current,
+		});
+		reportChange?.();
+		current = false;
+
+		await vi.waitFor(() => {
+			expect(mocks.loadImportedOpenAICodexAuth).toHaveBeenCalledTimes(1);
+		});
+		expect(onError).not.toHaveBeenCalled();
+		manager.stopPiAuthWatch();
 	});
 
 	it("leaves managed accounts untouched when auth.json has no codex entry", async () => {

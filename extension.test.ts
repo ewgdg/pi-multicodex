@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
 	handleNewSessionSwitch: vi.fn(),
 	buildMulticodexProviderConfig: vi.fn(() => ({ mocked: true })),
 	resetSessionWarnings: vi.fn(),
+	startPiAuthWatch: vi.fn(),
+	stopPiAuthWatch: vi.fn(),
 	statusRefreshFor: vi.fn(),
 	statusStartAutoRefresh: vi.fn(),
 	statusStopAutoRefresh: vi.fn(),
@@ -16,6 +18,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./account-manager", () => ({
 	AccountManager: class MockAccountManager {
 		resetSessionWarnings = mocks.resetSessionWarnings;
+		startPiAuthWatch = mocks.startPiAuthWatch;
+		stopPiAuthWatch = mocks.stopPiAuthWatch;
 	},
 }));
 
@@ -68,6 +72,8 @@ describe("multicodexExtension", () => {
 		mocks.handleNewSessionSwitch.mockResolvedValue(undefined);
 		mocks.buildMulticodexProviderConfig.mockClear();
 		mocks.resetSessionWarnings.mockClear();
+		mocks.startPiAuthWatch.mockClear();
+		mocks.stopPiAuthWatch.mockClear();
 		mocks.statusRefreshFor.mockClear();
 		mocks.statusStartAutoRefresh.mockClear();
 		mocks.statusStopAutoRefresh.mockClear();
@@ -126,6 +132,38 @@ describe("multicodexExtension", () => {
 		release();
 		await running;
 		expect(mocks.statusLoadPreferences).toHaveBeenCalledOnce();
+	});
+
+	it("guards auth sync by the current managed model and surfaces current errors", async () => {
+		const handlers = new Map<string, (...args: unknown[]) => void>();
+		const ctx = createMockContext();
+
+		multicodexExtension({
+			registerProvider: vi.fn(),
+			on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+				handlers.set(event, handler);
+			}),
+		} as never);
+
+		await handlers.get("session_start")?.({ reason: "resume" }, ctx as never);
+		const watchOptions = mocks.startPiAuthWatch.mock.calls[0]?.[0] as {
+			shouldApply: () => boolean;
+			onError: (error: unknown) => void;
+		};
+		expect(watchOptions.shouldApply()).toBe(true);
+
+		ctx.model = { provider: "anthropic" };
+		expect(watchOptions.shouldApply()).toBe(false);
+		watchOptions.onError(new Error("stale watcher failure"));
+		expect(ctx.ui.notify).not.toHaveBeenCalled();
+
+		ctx.model = { provider: "openai-codex" };
+		expect(watchOptions.shouldApply()).toBe(true);
+		watchOptions.onError(new Error("current watcher failure"));
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			"Multicodex: failed to sync pi auth: current watcher failure",
+			"warning",
+		);
 	});
 
 	it("skips managed startup when current model is not codex", async () => {
