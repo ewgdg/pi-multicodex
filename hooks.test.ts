@@ -32,7 +32,7 @@ describe("handleSessionStart", () => {
 		await vi.waitFor(() => {
 			expect(beginInitialization).toHaveBeenCalled();
 			expect(loadPiAuth).toHaveBeenCalled();
-			expect(refreshUsageForAllAccounts).toHaveBeenCalledWith({ force: true });
+			expect(refreshUsageForAllAccounts).toHaveBeenCalledWith(undefined);
 			expect(getAvailableManualAccount).toHaveBeenCalled();
 			expect(hasManualAccount).toHaveBeenCalled();
 			expect(clearManualAccount).not.toHaveBeenCalled();
@@ -67,7 +67,7 @@ describe("handleSessionStart", () => {
 		await vi.waitFor(() => {
 			expect(beginInitialization).toHaveBeenCalled();
 			expect(loadPiAuth).toHaveBeenCalled();
-			expect(refreshUsageForAllAccounts).toHaveBeenCalledWith({ force: true });
+			expect(refreshUsageForAllAccounts).toHaveBeenCalledWith(undefined);
 			expect(getAvailableManualAccount).toHaveBeenCalled();
 			expect(hasManualAccount).toHaveBeenCalled();
 			expect(clearManualAccount).not.toHaveBeenCalled();
@@ -282,7 +282,7 @@ describe("handleSessionStart", () => {
 		await vi.waitFor(() => {
 			expect(beginInitialization).toHaveBeenCalled();
 			expect(loadPiAuth).toHaveBeenCalled();
-			expect(refreshUsageForAllAccounts).toHaveBeenCalledWith({ force: true });
+			expect(refreshUsageForAllAccounts).toHaveBeenCalledWith(undefined);
 			expect(getAvailableManualAccount).toHaveBeenCalled();
 			expect(hasManualAccount).not.toHaveBeenCalled();
 			expect(clearManualAccount).not.toHaveBeenCalled();
@@ -319,7 +319,7 @@ describe("handleNewSessionSwitch", () => {
 		await vi.waitFor(() => {
 			expect(beginInitialization).toHaveBeenCalled();
 			expect(loadPiAuth).toHaveBeenCalled();
-			expect(refreshUsageForAllAccounts).toHaveBeenCalledWith({ force: true });
+			expect(refreshUsageForAllAccounts).toHaveBeenCalledWith(undefined);
 			expect(getAvailableManualAccount).toHaveBeenCalled();
 			expect(hasManualAccount).toHaveBeenCalled();
 			expect(clearManualAccount).toHaveBeenCalled();

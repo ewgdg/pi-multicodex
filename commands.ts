@@ -673,6 +673,7 @@ async function runAccountsSubcommand(
 	rest: string,
 ): Promise<void> {
 	await accountManager.refreshUsageForAllAccounts({
+		force: true,
 		warningHandler: (message) => ctx.ui.notify(message, "warning"),
 	});
 

@@ -34,9 +34,18 @@ vi.mock("./usage-client", () => ({
 }));
 
 import { AccountManager } from "./account-manager";
+import {
+	resetUsageCoordinatorForTests,
+	USAGE_FRESHNESS_INTERVAL_MS,
+} from "./usage-coordinator";
+
+beforeEach(() => {
+	resetUsageCoordinatorForTests();
+});
 
 describe("AccountManager pi auth import", () => {
 	beforeEach(() => {
+		resetUsageCoordinatorForTests();
 		vi.clearAllMocks();
 		mocks.storageData.accounts = [];
 		mocks.storageData.activeEmail = undefined;
@@ -961,5 +970,278 @@ describe("AccountManager ready-gate", () => {
 		manager.markReady(second);
 		await waiting;
 		expect(resolved).toBe(true);
+	});
+});
+
+describe("AccountManager usage coordinator facade", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mocks.storageData.accounts = [];
+		mocks.storageData.activeEmail = undefined;
+		mocks.loadImportedOpenAICodexAuth.mockResolvedValue(undefined);
+	});
+
+	it("shares snapshots and refresh eligibility across manager instances", async () => {
+		mocks.storageData.accounts = [
+			{
+				email: "first@example.com",
+				accessToken: "access",
+				refreshToken: "refresh",
+				expiresAt: Date.now() + 3_600_000,
+				accountId: "account-1",
+			},
+		];
+		mocks.fetchCodexUsage.mockResolvedValue({
+			primary: { usedPercent: 12 },
+			fetchedAt: Date.now(),
+		});
+
+		const first = new AccountManager();
+		const second = new AccountManager();
+		const firstAccount = first.getAccount("first@example.com");
+		const secondAccount = second.getAccount("first@example.com");
+		if (!firstAccount || !secondAccount) throw new Error("account missing");
+
+		await first.refreshUsageForAccount(firstAccount);
+		expect(
+			second.getCachedUsage("first@example.com")?.primary?.usedPercent,
+		).toBe(12);
+		await second.refreshUsageForAccount(secondAccount);
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledOnce();
+	});
+
+	it("uses account id identity when emails differ", async () => {
+		mocks.storageData.accounts = [
+			{
+				email: "first@example.com",
+				accessToken: "access",
+				refreshToken: "refresh",
+				expiresAt: Date.now() + 3_600_000,
+				accountId: "account-1",
+			},
+		];
+		mocks.fetchCodexUsage.mockResolvedValue({
+			primary: { usedPercent: 7 },
+			fetchedAt: Date.now(),
+		});
+		const first = new AccountManager();
+		const firstAccount = first.getAccount("first@example.com");
+		if (!firstAccount) throw new Error("account missing");
+		await first.refreshUsageForAccount(firstAccount);
+
+		mocks.storageData.accounts = [
+			{
+				email: "second@example.com",
+				accessToken: "access-2",
+				refreshToken: "refresh-2",
+				expiresAt: Date.now() + 3_600_000,
+				accountId: "account-1",
+			},
+		];
+		const second = new AccountManager();
+		expect(
+			second.getCachedUsage("second@example.com")?.primary?.usedPercent,
+		).toBe(7);
+	});
+
+	it("records consumption through active observer without warning on monitor failure", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1_000);
+		mocks.storageData.accounts = [
+			{
+				email: "consume@example.com",
+				accessToken: "access",
+				refreshToken: "refresh",
+				expiresAt: 3_600_000,
+			},
+		];
+		mocks.fetchCodexUsage
+			.mockResolvedValueOnce({ fetchedAt: 1_000 })
+			.mockRejectedValueOnce(new Error("monitor unavailable"));
+		const manager = new AccountManager();
+		const account = manager.getAccount("consume@example.com");
+		if (!account) throw new Error("account missing");
+		const warningHandler = vi.fn();
+		manager.setWarningHandler(warningHandler);
+		await manager.refreshUsageForAccount(account);
+		const unsubscribe = manager.subscribeUsageObserver();
+		manager.recordUsageConsumption(account);
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledOnce();
+		vi.advanceTimersByTime(30_000);
+		await vi.runOnlyPendingTimersAsync();
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledTimes(2);
+		expect(warningHandler).not.toHaveBeenCalled();
+		unsubscribe();
+		vi.useRealTimers();
+	});
+	it("binds usage notifications to observer lifecycle without manager state notifications", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1_000);
+		mocks.storageData.accounts = [
+			{
+				email: "observer@example.com",
+				accessToken: "access",
+				refreshToken: "refresh",
+				expiresAt: 3_600_000,
+			},
+		];
+		mocks.fetchCodexUsage
+			.mockResolvedValueOnce({ primary: { usedPercent: 10 }, fetchedAt: 1_000 })
+			.mockResolvedValueOnce({ primary: { usedPercent: 20 }, fetchedAt: 2_000 })
+			.mockResolvedValueOnce({
+				primary: { usedPercent: 30 },
+				fetchedAt: 3_000,
+			});
+		const manager = new AccountManager();
+		const account = manager.getAccount("observer@example.com");
+		if (!account) throw new Error("account missing");
+		const stateHandler = vi.fn();
+		manager.onStateChange(stateHandler);
+		const usageHandler = vi.fn();
+		const unsubscribe = manager.subscribeUsageObserver(usageHandler);
+
+		await manager.refreshUsageForAccount(account);
+		expect(usageHandler).toHaveBeenCalledOnce();
+		expect(stateHandler).not.toHaveBeenCalled();
+
+		unsubscribe();
+		manager.recordUsageConsumption(account);
+		await manager.refreshUsageForAccount(account, { force: true });
+		expect(usageHandler).toHaveBeenCalledOnce();
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledTimes(2);
+		expect(stateHandler).not.toHaveBeenCalled();
+		vi.useRealTimers();
+	});
+
+	it("invalidates usage when an account is removed and immediately re-added", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1_000);
+		mocks.fetchCodexUsage.mockReset();
+		mocks.storageData.accounts = [
+			{
+				email: "readd@example.com",
+				accessToken: "access",
+				refreshToken: "refresh",
+				expiresAt: 3_600_000,
+				accountId: "account-readd",
+			},
+		];
+		mocks.fetchCodexUsage
+			.mockResolvedValueOnce({ primary: { usedPercent: 10 }, fetchedAt: 0 })
+			.mockResolvedValueOnce({
+				primary: { usedPercent: 20 },
+				fetchedAt: 1_000,
+			});
+		const manager = new AccountManager();
+		const account = manager.getAccount("readd@example.com");
+		if (!account) throw new Error("account missing");
+		const observer = manager.subscribeUsageObserver();
+
+		await manager.refreshUsageForAccount(account);
+		manager.recordUsageConsumption(account);
+		expect(manager.removeAccount(account.email)).toBe(true);
+		manager.getAccounts().push({ ...account });
+
+		const readded = manager.getAccount(account.email);
+		if (!readded) throw new Error("re-added account missing");
+		expect(manager.getCachedUsage(readded.email)).toBeUndefined();
+		await manager.refreshUsageForAccount(readded);
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledTimes(2);
+
+		vi.advanceTimersByTime(USAGE_FRESHNESS_INTERVAL_MS);
+		await vi.runOnlyPendingTimersAsync();
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledTimes(2);
+		observer();
+		vi.useRealTimers();
+	});
+
+	it("does not let an in-flight refresh repopulate a removed account", async () => {
+		mocks.fetchCodexUsage.mockReset();
+		let release!: (value: { fetchedAt: number }) => void;
+		mocks.storageData.accounts = [
+			{
+				email: "inflight-remove@example.com",
+				accessToken: "access",
+				refreshToken: "refresh",
+				expiresAt: Date.now() + 3_600_000,
+				accountId: "account-inflight-remove",
+			},
+		];
+		mocks.fetchCodexUsage.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					release = resolve;
+				}),
+		);
+		const manager = new AccountManager();
+		const account = manager.getAccount("inflight-remove@example.com");
+		if (!account) throw new Error("account missing");
+		const refresh = manager.refreshUsageForAccount(account);
+		await vi.waitFor(() =>
+			expect(mocks.fetchCodexUsage).toHaveBeenCalledOnce(),
+		);
+
+		expect(manager.removeAccount(account.email)).toBe(true);
+		manager.getAccounts().push({ ...account });
+		release({ fetchedAt: Date.now() });
+		await refresh;
+
+		expect(manager.getCachedUsage(account.email)).toBeUndefined();
+	});
+
+	it("shares freshness after token validation mutates account identity", async () => {
+		mocks.storageData.accounts = [
+			{
+				email: "mutating@example.com",
+				accessToken: "access",
+				refreshToken: "refresh",
+				expiresAt: Date.now() + 3_600_000,
+			},
+		];
+		mocks.fetchCodexUsage.mockResolvedValue({
+			primary: { usedPercent: 18 },
+			fetchedAt: 1,
+		});
+		const manager = new AccountManager();
+		const account = manager.getAccount("mutating@example.com");
+		if (!account) throw new Error("account missing");
+		const ensureValidToken = vi
+			.spyOn(manager, "ensureValidToken")
+			.mockImplementation(async (current) => {
+				current.accountId = "account-mutated";
+				return "token";
+			});
+
+		await manager.refreshUsageForAccount(account);
+		expect(
+			manager.getCachedUsage("mutating@example.com")?.primary?.usedPercent,
+		).toBe(18);
+		await manager.refreshUsageForAccount(account);
+
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledOnce();
+		ensureValidToken.mockRestore();
+	});
+
+	it("ignores late consumption from an account object no longer managed", () => {
+		mocks.storageData.accounts = [
+			{
+				email: "late-stream@example.com",
+				accessToken: "access",
+				refreshToken: "refresh",
+				expiresAt: Date.now() + 3_600_000,
+			},
+		];
+		const manager = new AccountManager();
+		const account = manager.getAccount("late-stream@example.com");
+		if (!account) throw new Error("account missing");
+		const observer = manager.subscribeUsageObserver();
+
+		expect(manager.removeAccount(account.email)).toBe(true);
+		manager.getAccounts().push({ ...account });
+		manager.recordUsageConsumption(account);
+
+		expect(mocks.fetchCodexUsage).not.toHaveBeenCalled();
+		expect(manager.getCachedUsage(account.email)).toBeUndefined();
+		observer();
 	});
 });

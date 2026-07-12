@@ -392,6 +392,8 @@ export function createUsageStatusController(accountManager: AccountManager) {
 	let lifecycleVersion = 0;
 	let refreshInFlight = false;
 	let queuedRefresh = false;
+	let usageObserverUnsubscribe: (() => void) | undefined;
+	let usageObserverEligible: boolean | undefined;
 	let preferences: FooterPreferences = DEFAULT_PREFERENCES;
 	let livePreviewPreferences: FooterPreferences | undefined;
 
@@ -406,6 +408,53 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		return candidate.isInitializing?.() ?? false;
 	}
 
+	function stopUsageObserver(): void {
+		usageObserverUnsubscribe?.();
+		usageObserverUnsubscribe = undefined;
+	}
+
+	function syncUsageObserver(
+		ctx: ExtensionContext,
+		shouldBeActive: boolean,
+	): void {
+		let hasUI: boolean;
+		try {
+			hasUI = ctx.hasUI;
+		} catch {
+			stopUsageObserver();
+			return;
+		}
+
+		const active = shouldBeActive && isRunning && hasUI;
+		if (active && !usageObserverUnsubscribe) {
+			const version = lifecycleVersion;
+			usageObserverUnsubscribe = accountManager.subscribeUsageObserver(() => {
+				const currentContext = activeContext;
+				if (!currentContext || !isRunning || lifecycleVersion !== version)
+					return;
+				renderCachedStatus(
+					currentContext,
+					livePreviewPreferences ?? preferences,
+				);
+			});
+		}
+		if (!active) stopUsageObserver();
+	}
+
+	function syncUsageObserverForContext(ctx: ExtensionContext): void {
+		let modelEligible: boolean;
+		try {
+			modelEligible = ctx.hasUI && isManagedModel(ctx.model);
+		} catch {
+			stopUsageObserver();
+			return;
+		}
+		if (usageObserverEligible === undefined) {
+			usageObserverEligible = modelEligible;
+		}
+		syncUsageObserver(ctx, usageObserverEligible && modelEligible);
+	}
+
 	function withLiveContext<T>(
 		ctx: ExtensionContext,
 		operation: () => T,
@@ -416,6 +465,7 @@ export function createUsageStatusController(accountManager: AccountManager) {
 			if (activeContext === ctx) {
 				activeContext = undefined;
 				queuedRefresh = false;
+				stopUsageObserver();
 			}
 			return undefined;
 		}
@@ -470,8 +520,11 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		ctx: ExtensionContext,
 		preferencesOverride?: FooterPreferences,
 	): void {
+		syncUsageObserverForContext(ctx);
 		withLiveContext(ctx, () => {
-			if (!ctx.hasUI) return;
+			if (!ctx.hasUI) {
+				return;
+			}
 			if (!isManagedModel(ctx.model)) {
 				clearStatus(ctx);
 				return;
@@ -489,8 +542,11 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		version: number,
 	): Promise<void> {
 		if (!isCurrentContext(ctx, version)) return;
+		syncUsageObserverForContext(ctx);
 		const activeAccount = withLiveContext(ctx, () => {
-			if (!ctx.hasUI) return undefined;
+			if (!ctx.hasUI) {
+				return undefined;
+			}
 			if (!isManagedModel(ctx.model)) {
 				clearStatus(ctx);
 				return undefined;
@@ -521,6 +577,16 @@ export function createUsageStatusController(accountManager: AccountManager) {
 				},
 			})) ?? cachedUsage;
 		if (!isCurrentContext(ctx, version)) return;
+		syncUsageObserverForContext(ctx);
+		const canRender = withLiveContext(ctx, () => {
+			if (!isCurrentContext(ctx, version)) return false;
+			return (
+				usageObserverEligible !== false &&
+				ctx.hasUI &&
+				isManagedModel(ctx.model)
+			);
+		});
+		if (!canRender) return;
 		withLiveContext(ctx, () =>
 			ctx.ui.setStatus(
 				STATUS_KEY,
@@ -536,6 +602,7 @@ export function createUsageStatusController(accountManager: AccountManager) {
 
 	async function refreshFor(ctx: ExtensionContext): Promise<void> {
 		if (!isRunning) return;
+		if (activeContext !== ctx) usageObserverEligible = undefined;
 		activeContext = ctx;
 		const version = lifecycleVersion;
 		if (refreshInFlight) {
@@ -559,6 +626,7 @@ export function createUsageStatusController(accountManager: AccountManager) {
 
 	function scheduleModelSelectRefresh(ctx: ExtensionContext): void {
 		if (!isRunning) return;
+		if (activeContext !== ctx) usageObserverEligible = undefined;
 		activeContext = ctx;
 		const version = lifecycleVersion;
 		renderCachedStatus(ctx, livePreviewPreferences ?? preferences);
@@ -574,8 +642,16 @@ export function createUsageStatusController(accountManager: AccountManager) {
 	}
 
 	function startSession(): void {
+		stopUsageObserver();
+		if (modelSelectTimer) {
+			clearTimeout(modelSelectTimer);
+			modelSelectTimer = undefined;
+		}
 		isRunning = true;
 		lifecycleVersion += 1;
+		activeContext = undefined;
+		queuedRefresh = false;
+		usageObserverEligible = undefined;
 	}
 
 	function stopSession(ctx?: ExtensionContext): void {
@@ -585,10 +661,12 @@ export function createUsageStatusController(accountManager: AccountManager) {
 			clearTimeout(modelSelectTimer);
 			modelSelectTimer = undefined;
 		}
+		stopUsageObserver();
 		livePreviewPreferences = undefined;
 		clearStatus(ctx ?? activeContext);
 		activeContext = undefined;
 		queuedRefresh = false;
+		usageObserverEligible = undefined;
 	}
 
 	async function loadPreferences(ctx?: ExtensionContext): Promise<void> {
@@ -675,11 +753,32 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		await refreshFor(ctx);
 	}
 
+	function setUsageObserverActive(
+		ctx: ExtensionContext,
+		active: boolean,
+	): void {
+		activeContext = ctx;
+		usageObserverEligible = active;
+		if (!active) {
+			if (modelSelectTimer) {
+				clearTimeout(modelSelectTimer);
+				modelSelectTimer = undefined;
+			}
+			clearStatus(ctx);
+		}
+		if (active) {
+			syncUsageObserverForContext(ctx);
+		} else {
+			syncUsageObserver(ctx, false);
+		}
+	}
+
 	return {
 		loadPreferences,
 		openPreferencesPanel,
 		refreshFor,
 		scheduleModelSelectRefresh,
+		setUsageObserverActive,
 		startSession,
 		stopSession,
 		getPreferences: () => preferences,

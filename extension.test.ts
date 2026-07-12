@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
 	statusStopSession: vi.fn(),
 	statusLoadPreferences: vi.fn().mockResolvedValue(undefined),
 	statusScheduleModelSelectRefresh: vi.fn(),
+	statusSetUsageObserverActive: vi.fn(),
 }));
 
 vi.mock("./account-manager", () => ({
@@ -42,6 +43,7 @@ vi.mock("./status", () => ({
 		loadPreferences: mocks.statusLoadPreferences,
 		refreshFor: mocks.statusRefreshFor,
 		scheduleModelSelectRefresh: mocks.statusScheduleModelSelectRefresh,
+		setUsageObserverActive: mocks.statusSetUsageObserverActive,
 		startSession: mocks.statusStartSession,
 		stopSession: mocks.statusStopSession,
 	}),
@@ -79,6 +81,7 @@ describe("multicodexExtension", () => {
 		mocks.statusStopSession.mockClear();
 		mocks.statusLoadPreferences.mockClear();
 		mocks.statusScheduleModelSelectRefresh.mockClear();
+		mocks.statusSetUsageObserverActive.mockClear();
 	});
 
 	it("registers provider, commands, and lifecycle hooks", () => {
@@ -128,6 +131,7 @@ describe("multicodexExtension", () => {
 
 		const running = sessionStart?.({ reason: "resume" }, ctx as never);
 		expect(mocks.handleSessionStart).toHaveBeenCalledOnce();
+		expect(mocks.statusStartSession).toHaveBeenCalledOnce();
 		expect(mocks.statusLoadPreferences).not.toHaveBeenCalled();
 		release();
 		await running;
@@ -208,6 +212,7 @@ describe("multicodexExtension", () => {
 		);
 
 		expect(mocks.statusScheduleModelSelectRefresh).toHaveBeenCalledWith(ctx);
+		expect(mocks.statusSetUsageObserverActive).toHaveBeenCalledWith(ctx, true);
 		expect(mocks.handleSessionStart).toHaveBeenCalledOnce();
 		expect(mocks.handleNewSessionSwitch).not.toHaveBeenCalled();
 		expect(mocks.statusRefreshFor).toHaveBeenCalledWith(ctx);
@@ -239,7 +244,7 @@ describe("multicodexExtension", () => {
 		release();
 		await running;
 
-		expect(mocks.statusStartSession).not.toHaveBeenCalled();
+		expect(mocks.statusStartSession).toHaveBeenCalledOnce();
 		expect(mocks.statusLoadPreferences).not.toHaveBeenCalled();
 	});
 
@@ -384,6 +389,28 @@ describe("multicodexExtension", () => {
 		sessionStartWarning?.("stale hook warning");
 
 		expect(ctx.ui.notify).toHaveBeenCalledOnce();
+	});
+
+	it("suspends observer on non-Codex model selection", async () => {
+		const handlers = new Map<string, (...args: unknown[]) => void>();
+		const ctx = createMockContext();
+
+		multicodexExtension({
+			registerProvider: vi.fn(),
+			on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+				handlers.set(event, handler);
+			}),
+		} as never);
+
+		await handlers.get("session_start")?.({ reason: "resume" }, ctx as never);
+		mocks.statusSetUsageObserverActive.mockClear();
+		ctx.model = { provider: "anthropic" };
+		await handlers.get("model_select")?.(
+			{ model: { provider: "anthropic" } },
+			ctx as never,
+		);
+
+		expect(mocks.statusSetUsageObserverActive).toHaveBeenCalledWith(ctx, false);
 	});
 
 	it("routes session and status events to the helpers", async () => {

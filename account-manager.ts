@@ -24,8 +24,8 @@ import {
 	isFreshUsageHealthyForQuotaCooldown,
 } from "./usage";
 import { fetchCodexUsage } from "./usage-client";
+import { getUsageCoordinator } from "./usage-coordinator";
 
-const USAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 const USAGE_REQUEST_TIMEOUT_MS = 10 * 1000;
 const QUOTA_COOLDOWN_MS = 60 * 60 * 1000;
 const PI_AUTH_SYNC_RETRY_DELAYS_MS = [25, 50] as const;
@@ -55,7 +55,7 @@ interface PiAuthWatchOptions {
 
 export class AccountManager {
 	private data: StorageData;
-	private usageCache = new Map<string, CodexUsageSnapshot>();
+	private readonly usageCoordinator = getUsageCoordinator();
 	private refreshPromises = new Map<string, Promise<string>>();
 	private warningHandler?: WarningHandler;
 	private manualEmail?: string;
@@ -167,7 +167,6 @@ export class AccountManager {
 		const removedEmail = this.data.accounts[index]?.email;
 		this.data.accounts.splice(index, 1);
 		if (removedEmail) {
-			this.usageCache.delete(removedEmail);
 			if (this.manualEmail === removedEmail) {
 				this.manualEmail = undefined;
 			}
@@ -571,6 +570,7 @@ export class AccountManager {
 	removeAccount(email: string): boolean {
 		const account = this.getAccount(email);
 		if (!account) return false;
+		this.usageCoordinator.invalidate(account);
 		const removed = this.removeAccountRecord(account);
 		if (!removed) return false;
 		this.save();
@@ -579,7 +579,42 @@ export class AccountManager {
 	}
 
 	getCachedUsage(email: string): CodexUsageSnapshot | undefined {
-		return this.usageCache.get(email);
+		const account = this.getAccount(email);
+		return this.usageCoordinator.getCachedUsage(account ?? email);
+	}
+
+	subscribeUsageObserver(handler?: StateChangeHandler): () => void {
+		const unsubscribeObserver = this.usageCoordinator.subscribeActiveObserver();
+		const unsubscribeUsageChange = handler
+			? this.usageCoordinator.onUsageChange(() => handler())
+			: () => undefined;
+		let subscribed = true;
+		return () => {
+			if (!subscribed) return;
+			subscribed = false;
+			unsubscribeUsageChange();
+			unsubscribeObserver();
+		};
+	}
+
+	private async fetchUsageSnapshotForAccount(
+		account: Account,
+		options: { signal?: AbortSignal },
+	): Promise<CodexUsageSnapshot> {
+		const token = await this.ensureValidToken(account);
+		return fetchCodexUsage(token, account.accountId, {
+			signal: options.signal,
+			timeoutMs: USAGE_REQUEST_TIMEOUT_MS,
+		});
+	}
+
+	recordUsageConsumption(account: Account): void {
+		if (!this.getAccounts().some((candidate) => candidate === account)) return;
+		this.usageCoordinator.recordUsageConsumption(
+			account,
+			(_usageAccount, options) =>
+				this.fetchUsageSnapshotForAccount(account, options),
+		);
 	}
 
 	getAccountsNeedingReauth(): Account[] {
@@ -596,27 +631,18 @@ export class AccountManager {
 		account: Account,
 		options?: UsageRefreshOptions,
 	): Promise<CodexUsageSnapshot | undefined> {
-		if (account.needsReauth) return this.usageCache.get(account.email);
-
-		const cached = this.usageCache.get(account.email);
-		const now = Date.now();
-		if (
-			cached &&
-			!options?.force &&
-			now - cached.fetchedAt < USAGE_CACHE_TTL_MS
-		) {
-			return cached;
-		}
+		if (account.needsReauth) return this.getCachedUsage(account.email);
 
 		try {
-			const token = await this.ensureValidToken(account);
-			const usage = await fetchCodexUsage(token, account.accountId, {
-				signal: options?.signal,
-				timeoutMs: USAGE_REQUEST_TIMEOUT_MS,
-			});
-			this.usageCache.set(account.email, usage);
-			this.notifyStateChanged();
-			return usage;
+			return await this.usageCoordinator.refresh(
+				account,
+				(_usageAccount, request) =>
+					this.fetchUsageSnapshotForAccount(account, request),
+				{
+					force: options?.force,
+					signal: options?.signal,
+				},
+			);
 		} catch (error) {
 			(options?.warningHandler ?? this.warningHandler)?.(
 				`Multicodex: failed to fetch usage for ${account.email}: ${normalizeUnknownError(
@@ -640,16 +666,8 @@ export class AccountManager {
 		accounts: Account[],
 		options?: Omit<UsageRefreshOptions, "force">,
 	): Promise<void> {
-		const now = Date.now();
-		const stale = accounts.filter((account) => {
-			const cached = this.usageCache.get(account.email);
-			return !cached || now - cached.fetchedAt >= USAGE_CACHE_TTL_MS;
-		});
-		if (stale.length === 0) return;
 		await Promise.all(
-			stale.map((account) =>
-				this.refreshUsageForAccount(account, { force: true, ...options }),
-			),
+			accounts.map((account) => this.refreshUsageForAccount(account, options)),
 		);
 	}
 
@@ -668,7 +686,12 @@ export class AccountManager {
 		if (options?.shouldApply?.() === false) return undefined;
 
 		const activeEmail = this.getActiveAccount()?.email;
-		const selected = pickBestAccount(accounts, this.usageCache, {
+		const usageByEmail = new Map<string, CodexUsageSnapshot>();
+		for (const account of accounts) {
+			const usage = this.getCachedUsage(account.email);
+			if (usage) usageByEmail.set(account.email, usage);
+		}
+		const selected = pickBestAccount(accounts, usageByEmail, {
 			excludeEmails: options?.excludeEmails,
 			now,
 			cacheAffinity: options?.cacheAffinity

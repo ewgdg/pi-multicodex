@@ -1,0 +1,3 @@
+# Coordinate Codex usage per Pi runtime
+
+MultiCodex uses one process-wide Usage Coordinator as the source of usage snapshots and refresh eligibility for interactive, subagent, and workflow sessions. Codex response consumption triggers observer-gated, per-account refreshes with a 30-second freshness interval, single-flight request handling, and immediate plus trailing refresh behavior; idle polling and cross-process coordination remain out of scope. This avoids duplicate per-session requests while allowing the interactive footer and account rotation to receive fresh usage from headless activity.

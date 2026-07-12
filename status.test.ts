@@ -172,6 +172,7 @@ describe("createUsageStatusController", () => {
 		const setStatus = vi.fn();
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
+			subscribeUsageObserver: () => () => undefined,
 		} as never);
 
 		await controller.refreshFor(
@@ -186,6 +187,7 @@ describe("createUsageStatusController", () => {
 		const refreshUsageForAccount = vi.fn();
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
+			subscribeUsageObserver: () => () => undefined,
 			isInitializing: () => true,
 			getActiveAccount: () => ({ email: "old@example.com" }),
 			getCachedUsage: vi.fn(),
@@ -209,6 +211,7 @@ describe("createUsageStatusController", () => {
 		const setStatus = vi.fn();
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
+			subscribeUsageObserver: () => () => undefined,
 			getActiveAccount: () => ({ email: "a@example.com" }),
 			getCachedUsage: vi.fn(),
 			refreshUsageForAccount: vi.fn().mockResolvedValue({
@@ -238,6 +241,7 @@ describe("createUsageStatusController", () => {
 		const refreshUsageForAccount = vi.fn();
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
+			subscribeUsageObserver: () => () => undefined,
 			getActiveAccount: () => ({
 				email: "expired@example.com",
 				needsReauth: true,
@@ -267,6 +271,7 @@ describe("createUsageStatusController", () => {
 		const setStatus = vi.fn();
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
+			subscribeUsageObserver: () => () => undefined,
 			getActiveAccount: () => ({ email: "a@example.com" }),
 			getCachedUsage: () => ({
 				primary: { usedPercent: 30, resetAt: 1 },
@@ -298,6 +303,7 @@ describe("createUsageStatusController", () => {
 		});
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
+			subscribeUsageObserver: () => () => undefined,
 			getActiveAccount: () => ({ email: "a@example.com" }),
 			getCachedUsage: () => ({
 				primary: { usedPercent: 30, resetAt: 1 },
@@ -328,6 +334,7 @@ describe("createUsageStatusController", () => {
 		const refreshUsageForAccount = vi.fn();
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
+			subscribeUsageObserver: () => () => undefined,
 			getActiveAccount: () => ({ email: "a@example.com" }),
 			getCachedUsage: () => ({
 				primary: { usedPercent: 30, resetAt: 1 },
@@ -350,6 +357,7 @@ describe("createUsageStatusController", () => {
 		const refreshUsageForAccount = vi.fn().mockResolvedValue({ fetchedAt: 0 });
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
+			subscribeUsageObserver: () => () => undefined,
 			getActiveAccount: () => ({ email: "a@example.com" }),
 			getCachedUsage: vi.fn(),
 			refreshUsageForAccount,
@@ -394,6 +402,7 @@ describe("createUsageStatusController", () => {
 				stateChangeHandler = handler;
 				return () => undefined;
 			},
+			subscribeUsageObserver: () => () => undefined,
 			getActiveAccount: () => ({ email: "a@example.com" }),
 			getCachedUsage: vi.fn(),
 			refreshUsageForAccount: vi.fn().mockResolvedValue({ fetchedAt: 0 }),
@@ -428,6 +437,7 @@ describe("createUsageStatusController", () => {
 		);
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
+			subscribeUsageObserver: () => () => undefined,
 			getActiveAccount: () => ({ email: "a@example.com" }),
 			getCachedUsage: vi.fn(),
 			refreshUsageForAccount,
@@ -477,6 +487,7 @@ describe("createUsageStatusController", () => {
 				stateChangeHandler = handler;
 				return () => undefined;
 			},
+			subscribeUsageObserver: () => () => undefined,
 			getActiveAccount: () => ({ email: activeEmail }),
 			getCachedUsage: (email: string) => usages.get(email),
 			refreshUsageForAccount: vi
@@ -496,6 +507,317 @@ describe("createUsageStatusController", () => {
 		expect(setStatus).toHaveBeenLastCalledWith(
 			"multicodex-usage",
 			expect.stringContaining("5h:95% left"),
+		);
+	});
+
+	it("does not restore footer when model switches away during usage refresh", async () => {
+		const setStatus = vi.fn();
+		let provider = "openai-codex";
+		let resolveUsage:
+			| ((value: {
+					primary: { usedPercent: number };
+					fetchedAt: number;
+			  }) => void)
+			| undefined;
+		const refreshUsageForAccount = vi.fn(
+			() =>
+				new Promise<{ primary: { usedPercent: number }; fetchedAt: number }>(
+					(resolve) => {
+						resolveUsage = resolve;
+					},
+				),
+		);
+		const controller = createUsageStatusController({
+			onStateChange: () => () => undefined,
+			subscribeUsageObserver: () => () => undefined,
+			getActiveAccount: () => ({ email: "a@example.com" }),
+			getCachedUsage: vi.fn(),
+			refreshUsageForAccount,
+		} as never);
+		const ctx = {
+			hasUI: true,
+			get model() {
+				return { provider };
+			},
+			ui: {
+				setStatus,
+				notify: vi.fn(),
+				theme: {
+					fg: (_token: string, value: string) => value,
+					bold: (value: string) => value,
+				},
+			},
+		} as never;
+
+		const refresh = controller.refreshFor(ctx);
+		await vi.waitFor(() =>
+			expect(refreshUsageForAccount).toHaveBeenCalledOnce(),
+		);
+		setStatus.mockClear();
+		provider = "anthropic";
+		controller.setUsageObserverActive(ctx, false);
+		setStatus.mockClear();
+		resolveUsage?.({ primary: { usedPercent: 10 }, fetchedAt: 1 });
+		await refresh;
+
+		expect(setStatus).not.toHaveBeenCalledWith(
+			"multicodex-usage",
+			expect.stringContaining("10%"),
+		);
+	});
+
+	it("unsubscribes the usage observer when rendering the live context fails", async () => {
+		const setStatus = vi.fn(() => {
+			throw new Error("stale ui");
+		});
+		const unsubscribe = vi.fn();
+		let stateChangeHandler: (() => void) | undefined;
+		const controller = createUsageStatusController({
+			onStateChange: (handler: () => void) => {
+				stateChangeHandler = handler;
+				return () => undefined;
+			},
+			subscribeUsageObserver: () => unsubscribe,
+			getActiveAccount: () => ({ email: "a@example.com" }),
+			getCachedUsage: vi.fn(),
+			refreshUsageForAccount: vi.fn().mockResolvedValue({ fetchedAt: 1 }),
+		} as never);
+		const ctx = createContext({ setStatus });
+
+		await expect(controller.refreshFor(ctx)).resolves.toBeUndefined();
+		stateChangeHandler?.();
+
+		expect(unsubscribe).toHaveBeenCalledOnce();
+	});
+
+	it("clears stale context before new-session startup can report state changes", async () => {
+		const setStatus = vi.fn();
+		let stateChangeHandler: (() => void) | undefined;
+		const controller = createUsageStatusController({
+			onStateChange: (handler: () => void) => {
+				stateChangeHandler = handler;
+				return () => undefined;
+			},
+			subscribeUsageObserver: () => () => undefined,
+			getActiveAccount: () => ({ email: "a@example.com" }),
+			getCachedUsage: vi.fn(),
+			refreshUsageForAccount: vi.fn().mockResolvedValue({ fetchedAt: 1 }),
+		} as never);
+		const ctx = createContext({ setStatus });
+
+		await controller.refreshFor(ctx);
+		controller.startSession();
+		setStatus.mockClear();
+		stateChangeHandler?.();
+
+		expect(setStatus).not.toHaveBeenCalled();
+	});
+});
+
+describe("active usage observer lifecycle", () => {
+	it("observes only interactive managed sessions and unsubscribes on model switch/shutdown", async () => {
+		const setStatus = vi.fn();
+		const unsubscribe = vi.fn();
+		const subscribeUsageObserver = vi.fn(() => unsubscribe);
+		const refreshUsageForAccount = vi
+			.fn()
+			.mockResolvedValue({ fetchedAt: Date.now() });
+		const controller = createUsageStatusController({
+			onStateChange: () => () => undefined,
+			getActiveAccount: () => ({ email: "a@example.com" }),
+			getCachedUsage: vi.fn(),
+			refreshUsageForAccount,
+			subscribeUsageObserver,
+		} as never);
+		const ctx = createContext({ setStatus });
+
+		await controller.refreshFor(ctx);
+		expect(subscribeUsageObserver).toHaveBeenCalledOnce();
+
+		controller.setUsageObserverActive(ctx, false);
+		expect(unsubscribe).toHaveBeenCalledOnce();
+
+		controller.setUsageObserverActive(ctx, true);
+		expect(subscribeUsageObserver).toHaveBeenCalledTimes(2);
+		controller.stopSession(ctx);
+		expect(unsubscribe).toHaveBeenCalledTimes(2);
+	});
+
+	it("propagates observer registration errors", async () => {
+		const registrationError = new Error("observer registration failed");
+		const controller = createUsageStatusController({
+			onStateChange: () => () => undefined,
+			getActiveAccount: () => ({ email: "a@example.com" }),
+			getCachedUsage: vi.fn(),
+			refreshUsageForAccount: vi.fn(),
+			subscribeUsageObserver: () => {
+				throw registrationError;
+			},
+		} as never);
+		const ctx = createContext();
+
+		expect(() => controller.setUsageObserverActive(ctx, true)).toThrow(
+			registrationError,
+		);
+		await expect(controller.refreshFor(ctx)).rejects.toThrow(registrationError);
+	});
+	it("re-renders current cached footer when shared usage snapshot changes", async () => {
+		const setStatus = vi.fn();
+		let usageHandler: (() => void) | undefined;
+		const activeEmail = "a@example.com";
+		const usages = new Map([
+			[
+				"a@example.com",
+				{
+					primary: { usedPercent: 30, resetAt: 1 },
+					secondary: { usedPercent: 40, resetAt: 2 },
+					fetchedAt: 0,
+				},
+			],
+		]);
+		const subscribeUsageObserver = vi.fn((handler: () => void) => {
+			usageHandler = handler;
+			return () => {
+				usageHandler = undefined;
+			};
+		});
+		const controller = createUsageStatusController({
+			onStateChange: () => () => undefined,
+			getActiveAccount: () => ({ email: activeEmail }),
+			getCachedUsage: (email: string) => usages.get(email),
+			refreshUsageForAccount: vi
+				.fn()
+				.mockImplementation(async () => usages.get(activeEmail)),
+			subscribeUsageObserver,
+		} as never);
+		const ctx = createContext({ setStatus });
+
+		await controller.refreshFor(ctx);
+		expect(subscribeUsageObserver).toHaveBeenCalledWith(expect.any(Function));
+		setStatus.mockClear();
+		usages.set("a@example.com", {
+			primary: { usedPercent: 65, resetAt: 1 },
+			secondary: { usedPercent: 75, resetAt: 2 },
+			fetchedAt: 1,
+		});
+		usageHandler?.();
+
+		expect(setStatus).toHaveBeenLastCalledWith(
+			"multicodex-usage",
+			expect.stringContaining("5h:35% left"),
+		);
+
+		controller.stopSession(ctx);
+		setStatus.mockClear();
+		usageHandler?.();
+		expect(setStatus).not.toHaveBeenCalled();
+	});
+
+	it("renders usage updates in latest same-session context without duplicating observer", async () => {
+		const setStatusA = vi.fn();
+		const setStatusB = vi.fn();
+		let usageHandler: (() => void) | undefined;
+		const usages = new Map([
+			[
+				"a@example.com",
+				{
+					primary: { usedPercent: 30, resetAt: 1 },
+					secondary: { usedPercent: 40, resetAt: 2 },
+					fetchedAt: 0,
+				},
+			],
+		]);
+		const subscribeUsageObserver = vi.fn((handler: () => void) => {
+			usageHandler = handler;
+			return () => undefined;
+		});
+		const controller = createUsageStatusController({
+			onStateChange: () => () => undefined,
+			getActiveAccount: () => ({ email: "a@example.com" }),
+			getCachedUsage: (email: string) => usages.get(email),
+			refreshUsageForAccount: vi
+				.fn()
+				.mockImplementation(async () => usages.get("a@example.com")),
+			subscribeUsageObserver,
+		} as never);
+		const ctxA = createContext({ setStatus: setStatusA });
+		const ctxB = createContext({ setStatus: setStatusB });
+
+		await controller.refreshFor(ctxA);
+		await controller.refreshFor(ctxB);
+
+		expect(subscribeUsageObserver).toHaveBeenCalledOnce();
+		setStatusA.mockClear();
+		setStatusB.mockClear();
+		usages.set("a@example.com", {
+			primary: { usedPercent: 65, resetAt: 1 },
+			secondary: { usedPercent: 75, resetAt: 2 },
+			fetchedAt: 1,
+		});
+		usageHandler?.();
+
+		expect(setStatusA).not.toHaveBeenCalled();
+		expect(setStatusB).toHaveBeenLastCalledWith(
+			"multicodex-usage",
+			expect.stringContaining("5h:35% left"),
+		);
+	});
+
+	it("rebinds usage observer when a new session starts before old shutdown", async () => {
+		const setStatus = vi.fn();
+		let activeEmail = "a@example.com";
+		const usages = new Map([
+			[
+				"a@example.com",
+				{
+					primary: { usedPercent: 10 },
+					secondary: { usedPercent: 20 },
+					fetchedAt: 0,
+				},
+			],
+			[
+				"b@example.com",
+				{
+					primary: { usedPercent: 30 },
+					secondary: { usedPercent: 40 },
+					fetchedAt: 0,
+				},
+			],
+		]);
+		const subscriptions: Array<{ handler: () => void; active: boolean }> = [];
+		const subscribeUsageObserver = vi.fn((handler: () => void) => {
+			const subscription = { handler, active: true };
+			subscriptions.push(subscription);
+			return () => {
+				subscription.active = false;
+			};
+		});
+		const controller = createUsageStatusController({
+			onStateChange: () => () => undefined,
+			getActiveAccount: () => ({ email: activeEmail }),
+			getCachedUsage: (email: string) => usages.get(email),
+			refreshUsageForAccount: vi
+				.fn()
+				.mockImplementation(async () => usages.get(activeEmail)),
+			subscribeUsageObserver,
+		} as never);
+		const firstContext = createContext({ setStatus });
+		const secondContext = createContext({ setStatus });
+
+		await controller.refreshFor(firstContext);
+		controller.startSession();
+		activeEmail = "b@example.com";
+		await controller.refreshFor(secondContext);
+
+		expect(subscribeUsageObserver).toHaveBeenCalledTimes(2);
+		expect(subscriptions[0]?.active).toBe(false);
+		setStatus.mockClear();
+		subscriptions[0]?.handler();
+		expect(setStatus).not.toHaveBeenCalled();
+		subscriptions[1]?.handler();
+		expect(setStatus).toHaveBeenLastCalledWith(
+			"multicodex-usage",
+			expect.stringContaining("b@example.com"),
 		);
 	});
 });

@@ -110,7 +110,7 @@ async function refreshAndActivateBestAccount(
 		if (accountManager.getAccounts().length === 0) return;
 
 		await accountManager.refreshUsageForAllAccounts(
-			warningHandler ? { force: true, warningHandler } : { force: true },
+			warningHandler ? { warningHandler } : undefined,
 		);
 		if (!isStartupCurrent(rotationContext)) return;
 

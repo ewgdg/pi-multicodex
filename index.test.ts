@@ -530,6 +530,7 @@ describe("manual account selection", () => {
 			},
 			ensureValidToken: async () => "manual-token",
 			handleQuotaExceeded: async () => {},
+			recordUsageConsumption: () => {},
 		} as unknown as AccountManager;
 
 		const baseProvider = {
@@ -586,6 +587,7 @@ describe("manual account selection", () => {
 			reconcileQuotaCooldowns,
 			ensureValidToken: async () => "active-token",
 			handleQuotaExceeded: async () => {},
+			recordUsageConsumption: () => {},
 		} as unknown as AccountManager;
 
 		const baseProvider = {
@@ -640,6 +642,7 @@ describe("manual account selection", () => {
 			activateBestAccount: async () => auto,
 			ensureValidToken: async () => "auto-token",
 			handleQuotaExceeded: async () => {},
+			recordUsageConsumption: () => {},
 		} as unknown as AccountManager;
 
 		const baseProvider = {
@@ -698,6 +701,7 @@ describe("manual account selection", () => {
 			reconcileQuotaCooldowns,
 			ensureValidToken: async () => "reconciled-token",
 			handleQuotaExceeded: async () => {},
+			recordUsageConsumption: () => {},
 		} as unknown as AccountManager;
 
 		const baseProvider = {
@@ -758,6 +762,7 @@ describe("manual account selection", () => {
 			},
 			ensureValidToken: async (account: Account) => `${account.email}-token`,
 			handleQuotaExceeded: async () => {},
+			recordUsageConsumption: () => {},
 		} as unknown as AccountManager;
 
 		const baseProvider = {
@@ -831,6 +836,7 @@ describe("manual account selection", () => {
 			},
 			notifyRotationSkipForAuthFailure,
 			handleQuotaExceeded: async () => {},
+			recordUsageConsumption: () => {},
 		} as unknown as AccountManager;
 
 		const baseProvider = {
@@ -870,5 +876,406 @@ describe("manual account selection", () => {
 			broken,
 			expect.any(Error),
 		);
+	});
+});
+
+describe("stream usage consumption attribution", () => {
+	function createStreamingManager(
+		account: Account,
+		recordUsageConsumption: ReturnType<typeof vi.fn>,
+		overrides?: Partial<Record<string, unknown>>,
+	): AccountManager {
+		return {
+			waitUntilReady: async () => {},
+			getAvailableManualAccount: () => undefined,
+			hasManualAccount: () => false,
+			clearManualAccount: () => {},
+			getAvailableActiveAccount: () => account,
+			activateBestAccount: async () => undefined,
+			ensureValidToken: async () => "token",
+			handleQuotaExceeded: async () => {},
+			recordUsageConsumption,
+			...overrides,
+		} as unknown as AccountManager;
+	}
+
+	function createBaseProvider(
+		events: unknown[],
+	): Parameters<typeof createStreamWrapper>[1] {
+		return {
+			streamSimple: () => {
+				async function* inner() {
+					for (const event of events) yield event;
+				}
+				return inner() as never;
+			},
+		};
+	}
+
+	it("records exactly once when provider emits done", async () => {
+		const account = makeAccount("done@example.com");
+		const recordUsageConsumption = vi.fn();
+		const stream = createStreamWrapper(
+			createStreamingManager(account, recordUsageConsumption),
+			createBaseProvider([
+				{
+					type: "done",
+					reason: "stop",
+					message: { provider: "openai-codex", role: "assistant" },
+				},
+			]),
+		)(
+			{
+				id: "test",
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+			} as StreamModel,
+			{} as StreamContext,
+		);
+
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect(recordUsageConsumption).toHaveBeenCalledOnce();
+		expect(recordUsageConsumption).toHaveBeenCalledWith(account);
+	});
+
+	it("records partial assistant output before a terminal error", async () => {
+		const account = makeAccount("partial@example.com");
+		const recordUsageConsumption = vi.fn();
+		const stream = createStreamWrapper(
+			createStreamingManager(account, recordUsageConsumption),
+			createBaseProvider([
+				{
+					type: "text_delta",
+					contentIndex: 0,
+					delta: "partial",
+					partial: { provider: "openai-codex" },
+				},
+				{
+					type: "error",
+					reason: "error",
+					error: {
+						provider: "openai-codex",
+						errorMessage: "connection closed",
+					},
+				},
+			]),
+		)(
+			{
+				id: "test",
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+			} as StreamModel,
+			{} as StreamContext,
+		);
+
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect(recordUsageConsumption).toHaveBeenCalledOnce();
+	});
+
+	it("does not attribute protocol starts without output before a terminal error", async () => {
+		const account = makeAccount("start-only@example.com");
+		const recordUsageConsumption = vi.fn();
+		const stream = createStreamWrapper(
+			createStreamingManager(account, recordUsageConsumption),
+			createBaseProvider([
+				{
+					type: "start",
+					partial: { provider: "openai-codex", role: "assistant" },
+				},
+				{
+					type: "text_start",
+					contentIndex: 0,
+					partial: { provider: "openai-codex", role: "assistant" },
+				},
+				{
+					type: "error",
+					reason: "error",
+					error: {
+						provider: "openai-codex",
+						errorMessage: "connection closed",
+					},
+				},
+			]),
+		)(
+			{
+				id: "test",
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+			} as StreamModel,
+			{} as StreamContext,
+		);
+
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect(recordUsageConsumption).not.toHaveBeenCalled();
+	});
+
+	it("preserves protocol event order after first output", async () => {
+		const account = makeAccount("ordered@example.com");
+		const stream = createStreamWrapper(
+			createStreamingManager(account, vi.fn()),
+			createBaseProvider([
+				{ type: "start", partial: { provider: "openai-codex" } },
+				{
+					type: "text_start",
+					contentIndex: 0,
+					partial: { provider: "openai-codex" },
+				},
+				{
+					type: "text_delta",
+					contentIndex: 0,
+					delta: "hello",
+					partial: { provider: "openai-codex" },
+				},
+				{
+					type: "text_end",
+					contentIndex: 0,
+					content: "hello",
+					partial: { provider: "openai-codex" },
+				},
+				{
+					type: "toolcall_start",
+					contentIndex: 1,
+					partial: { provider: "openai-codex" },
+				},
+				{
+					type: "toolcall_delta",
+					contentIndex: 1,
+					delta: "{}",
+					partial: { provider: "openai-codex" },
+				},
+				{
+					type: "done",
+					reason: "toolUse",
+					message: { provider: "openai-codex" },
+				},
+			]),
+		)(
+			{
+				id: "test",
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+			} as StreamModel,
+			{} as StreamContext,
+		);
+		const eventTypes: string[] = [];
+
+		for await (const event of stream) eventTypes.push(event.type);
+
+		expect(eventTypes).toEqual([
+			"start",
+			"text_start",
+			"text_delta",
+			"text_end",
+			"toolcall_start",
+			"toolcall_delta",
+			"done",
+		]);
+	});
+
+	it("does not attribute quota rejection before output, but attributes retry success", async () => {
+		const first = makeAccount("first@example.com");
+		const second = makeAccount("second@example.com");
+		const recordUsageConsumption = vi.fn();
+		let selected = first;
+		const handleQuotaExceeded = vi.fn();
+		const manager = createStreamingManager(first, recordUsageConsumption, {
+			getAvailableActiveAccount: (options?: {
+				excludeEmails?: Set<string>;
+			}) => {
+				selected = options?.excludeEmails?.has(first.email) ? second : first;
+				return selected;
+			},
+			handleQuotaExceeded,
+		});
+		let calls = 0;
+		const baseProvider = {
+			streamSimple: () => {
+				calls += 1;
+				async function* inner() {
+					if (calls === 1) {
+						yield {
+							type: "error",
+							reason: "error",
+							error: {
+								provider: "openai-codex",
+								errorMessage: "quota exceeded",
+							},
+						};
+						return;
+					}
+					yield {
+						type: "done",
+						reason: "stop",
+						message: { provider: "openai-codex", role: "assistant" },
+					};
+				}
+				return inner() as never;
+			},
+		};
+		const stream = createStreamWrapper(manager, baseProvider as never)(
+			{
+				id: "test",
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+			} as StreamModel,
+			{} as StreamContext,
+		);
+
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect(handleQuotaExceeded).toHaveBeenCalledOnce();
+		expect(recordUsageConsumption).toHaveBeenCalledOnce();
+		expect(recordUsageConsumption).toHaveBeenCalledWith(second);
+	});
+
+	it("buffers protocol starts so quota retry emits only one start sequence", async () => {
+		const first = makeAccount("buffer-first@example.com");
+		const second = makeAccount("buffer-second@example.com");
+		const recordUsageConsumption = vi.fn();
+		let selected = first;
+		let calls = 0;
+		const manager = createStreamingManager(first, recordUsageConsumption, {
+			getAvailableActiveAccount: (options?: {
+				excludeEmails?: Set<string>;
+			}) => {
+				selected = options?.excludeEmails?.has(first.email) ? second : first;
+				return selected;
+			},
+		});
+		const baseProvider = {
+			streamSimple: () => {
+				calls += 1;
+				async function* inner() {
+					if (calls === 1) {
+						yield { type: "start", partial: { provider: "openai-codex" } };
+						yield {
+							type: "text_start",
+							contentIndex: 0,
+							partial: { provider: "openai-codex" },
+						};
+						yield {
+							type: "error",
+							reason: "error",
+							error: {
+								provider: "openai-codex",
+								errorMessage: "quota exceeded",
+							},
+						};
+						return;
+					}
+					yield { type: "start", partial: { provider: "openai-codex" } };
+					yield {
+						type: "text_start",
+						contentIndex: 0,
+						partial: { provider: "openai-codex" },
+					};
+					yield {
+						type: "text_delta",
+						contentIndex: 0,
+						delta: "ok",
+						partial: { provider: "openai-codex" },
+					};
+					yield {
+						type: "done",
+						reason: "stop",
+						message: { provider: "openai-codex", role: "assistant" },
+					};
+				}
+				return inner() as never;
+			},
+		};
+		const stream = createStreamWrapper(manager, baseProvider as never)(
+			{
+				id: "test",
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+			} as StreamModel,
+			{} as StreamContext,
+		);
+		const events = [];
+		for await (const event of stream) events.push(event);
+
+		expect(events.map((event) => event.type)).toEqual([
+			"start",
+			"text_start",
+			"text_delta",
+			"done",
+		]);
+		expect(recordUsageConsumption).toHaveBeenCalledOnce();
+		expect(recordUsageConsumption).toHaveBeenCalledWith(second);
+	});
+
+	it("flushes buffered protocol events before a nonquota error without recording consumption", async () => {
+		const account = makeAccount("buffer-error@example.com");
+		const recordUsageConsumption = vi.fn();
+		const stream = createStreamWrapper(
+			createStreamingManager(account, recordUsageConsumption),
+			createBaseProvider([
+				{ type: "start", partial: { provider: "openai-codex" } },
+				{
+					type: "text_start",
+					contentIndex: 0,
+					partial: { provider: "openai-codex" },
+				},
+				{
+					type: "error",
+					reason: "error",
+					error: {
+						provider: "openai-codex",
+						errorMessage: "connection closed",
+					},
+				},
+			]),
+		)(
+			{
+				id: "test",
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+			} as StreamModel,
+			{} as StreamContext,
+		);
+		const events = [];
+		for await (const event of stream) events.push(event);
+
+		expect(events.map((event) => event.type)).toEqual([
+			"start",
+			"text_start",
+			"error",
+		]);
+		expect(recordUsageConsumption).not.toHaveBeenCalled();
+	});
+
+	it("preserves protocol events when provider iterator ends without a terminal event", async () => {
+		const account = makeAccount("iterator-end@example.com");
+		const recordUsageConsumption = vi.fn();
+		const stream = createStreamWrapper(
+			createStreamingManager(account, recordUsageConsumption),
+			createBaseProvider([
+				{ type: "start", partial: { provider: "openai-codex" } },
+			]),
+		)(
+			{
+				id: "test",
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+			} as StreamModel,
+			{} as StreamContext,
+		);
+		const events = [];
+		for await (const event of stream) events.push(event);
+
+		expect(events.map((event) => event.type)).toEqual(["start"]);
+		expect(recordUsageConsumption).not.toHaveBeenCalled();
 	});
 });

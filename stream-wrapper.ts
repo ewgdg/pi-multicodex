@@ -18,6 +18,22 @@ import {
 
 const MAX_ROTATION_RETRIES = 5;
 
+function producedOutput(event: AssistantMessageEvent): boolean {
+	switch (event.type) {
+		case "text_delta":
+		case "thinking_delta":
+		case "toolcall_delta":
+			return event.delta.length > 0;
+		case "text_end":
+		case "thinking_end":
+			return event.content.length > 0;
+		case "toolcall_end":
+			return true;
+		default:
+			return false;
+	}
+}
+
 type ApiProviderRef = {
 	streamSimple: (
 		model: Model<Api>,
@@ -126,45 +142,92 @@ export function createStreamWrapper(
 						},
 					);
 
-					let forwardedAny = false;
+					let producedOutputAny = false;
+					let usageConsumptionRecorded = false;
 					let retry = false;
+					const bufferedEvents: AssistantMessageEvent[] = [];
+					const recordUsageConsumption = () => {
+						if (usageConsumptionRecorded) return;
+						usageConsumptionRecorded = true;
+						accountManager.recordUsageConsumption(account);
+					};
+					const flushBufferedEvents = () => {
+						for (const bufferedEvent of bufferedEvents) {
+							stream.push(
+								rewriteProviderOnEvent(bufferedEvent, model.provider),
+							);
+						}
+						bufferedEvents.length = 0;
+					};
+					const forwardEvent = (event: AssistantMessageEvent) => {
+						if (producedOutputAny) {
+							stream.push(rewriteProviderOnEvent(event, model.provider));
+							return;
+						}
+						if (producedOutput(event)) {
+							flushBufferedEvents();
+							producedOutputAny = true;
+							stream.push(rewriteProviderOnEvent(event, model.provider));
+							return;
+						}
+						bufferedEvents.push(event);
+					};
 
-					for await (const event of inner) {
-						if (event.type === "error") {
-							const msg = event.error.errorMessage || "";
-							const isQuota = isQuotaErrorMessage(msg);
+					try {
+						for await (const event of inner) {
+							if (event.type === "error") {
+								const msg = event.error.errorMessage || "";
+								const isQuota = isQuotaErrorMessage(msg);
 
-							if (isQuota && !forwardedAny && attempt < MAX_ROTATION_RETRIES) {
-								await accountManager.handleQuotaExceeded(account, {
-									signal: options?.signal,
-								});
-								if (usingManual) {
-									accountManager.clearManualAccount();
+								if (
+									isQuota &&
+									!producedOutputAny &&
+									attempt < MAX_ROTATION_RETRIES
+								) {
+									await accountManager.handleQuotaExceeded(account, {
+										signal: options?.signal,
+									});
+									if (usingManual) {
+										accountManager.clearManualAccount();
+									}
+									excludedEmails.add(account.email);
+									abortController.abort();
+									bufferedEvents.length = 0;
+									retry = true;
+									break;
 								}
-								excludedEmails.add(account.email);
-								abortController.abort();
-								retry = true;
-								break;
+
+								flushBufferedEvents();
+								if (producedOutputAny) recordUsageConsumption();
+								stream.push(rewriteProviderOnEvent(event, model.provider));
+								stream.end();
+								return;
 							}
 
-							stream.push(rewriteProviderOnEvent(event, model.provider));
-							stream.end();
-							return;
-						}
+							if (event.type === "done") {
+								flushBufferedEvents();
+								stream.push(rewriteProviderOnEvent(event, model.provider));
+								recordUsageConsumption();
+								stream.end();
+								return;
+							}
 
-						forwardedAny = true;
-						stream.push(rewriteProviderOnEvent(event, model.provider));
-
-						if (event.type === "done") {
-							stream.end();
-							return;
+							forwardEvent(event);
 						}
+					} catch (error) {
+						if (!retry) {
+							flushBufferedEvents();
+							if (producedOutputAny) recordUsageConsumption();
+						}
+						throw error;
 					}
 
 					if (retry) {
 						continue;
 					}
 
+					flushBufferedEvents();
+					if (producedOutputAny) recordUsageConsumption();
 					stream.end();
 					return;
 				}

@@ -131,6 +131,7 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 			lifecycleVersion += 1;
 			managedStartupInitialized = false;
 			const version = lifecycleVersion;
+			statusController.startSession();
 			accountManager.resetSessionWarnings();
 			// Never touch account rotation while another provider is active. Registering
 			// MultiCodex makes Codex available, but it must not pull non-Codex sessions
@@ -146,7 +147,6 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 				accountManager.stopPiAuthWatch();
 			}
 			if (!isCurrentContext(ctx, version)) return;
-			statusController.startSession();
 			await statusController.loadPreferences(ctx);
 			if (!isCurrentContext(ctx, version)) return;
 			await statusController.refreshFor(ctx);
@@ -164,6 +164,7 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		statusController.scheduleModelSelectRefresh(ctx);
 		const selectedModel = getSelectedModel(event) ?? ctx.model;
 		activeModelProvider = selectedModel?.provider;
+		statusController.setUsageObserverActive(ctx, isManagedModel(selectedModel));
 		if (!isManagedModel(selectedModel)) {
 			accountManager.stopPiAuthWatch();
 			return;

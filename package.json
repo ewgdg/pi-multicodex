@@ -45,6 +45,7 @@
 		"storage.ts",
 		"stream-wrapper.ts",
 		"usage-client.ts",
+		"usage-coordinator.ts",
 		"usage.ts",
 		"README.md",
 		"LICENSE",
