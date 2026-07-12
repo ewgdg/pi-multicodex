@@ -103,6 +103,24 @@ type StreamContext = Parameters<StreamWrapper>[1];
 type BaseProvider = Parameters<typeof createStreamWrapper>[1];
 
 describe("usage helpers", () => {
+	it("classifies a lone seven-day API window by its duration", () => {
+		const response = parseCodexUsageResponse({
+			plan_type: "plus",
+			rate_limit: {
+				primary_window: {
+					limit_window_seconds: 604_800,
+					reset_at: 1784489372,
+					used_percent: 1,
+				},
+				secondary_window: undefined,
+			},
+		});
+
+		expect(response.primary).toBeUndefined();
+		expect(response.secondary?.usedPercent).toBe(1);
+		expect(response.secondary?.limitWindowSeconds).toBe(604_800);
+	});
+
 	it("parses usage response windows and plan metadata", () => {
 		const response = parseCodexUsageResponse({
 			plan_type: "prolite",

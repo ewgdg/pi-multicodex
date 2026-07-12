@@ -29,8 +29,8 @@ export interface CodexUsageSnapshot {
 interface WhamUsageResponse {
 	plan_type?: string;
 	rate_limit?: {
-		primary_window?: WhamUsageWindow;
-		secondary_window?: WhamUsageWindow;
+		primary_window?: WhamUsageWindow | null;
+		secondary_window?: WhamUsageWindow | null;
 	};
 }
 
@@ -42,6 +42,9 @@ type WhamUsageWindow = {
 	reset_at?: number;
 	used_percent?: number;
 };
+
+const FIVE_HOUR_WINDOW_SECONDS = 5 * 60 * 60;
+const SEVEN_DAY_WINDOW_SECONDS = 7 * 24 * 60 * 60;
 
 export const PLAN_CAPACITY_MULTIPLIERS: Record<CodexPlanType, number> = {
 	free: 0.1,
@@ -76,7 +79,7 @@ function normalizeBoolean(value?: boolean): boolean | undefined {
 }
 
 function parseUsageWindow(
-	window?: WhamUsageWindow,
+	window?: WhamUsageWindow | null,
 ): CodexUsageWindow | undefined {
 	if (!window) return undefined;
 	const usedPercent = normalizeUsedPercent(window.used_percent);
@@ -109,12 +112,52 @@ function parseUsageWindow(
 	};
 }
 
+function classifyUsageWindows(rateLimit: WhamUsageResponse["rate_limit"]): {
+	primary?: CodexUsageWindow;
+	secondary?: CodexUsageWindow;
+} {
+	const windows = [
+		{ source: "primary", usage: parseUsageWindow(rateLimit?.primary_window) },
+		{
+			source: "secondary",
+			usage: parseUsageWindow(rateLimit?.secondary_window),
+		},
+	].filter(
+		(
+			entry,
+		): entry is {
+			source: "primary" | "secondary";
+			usage: CodexUsageWindow;
+		} => entry.usage !== undefined,
+	);
+
+	let primary = windows.find(
+		({ usage }) => usage.limitWindowSeconds === FIVE_HOUR_WINDOW_SECONDS,
+	)?.usage;
+	let secondary = windows.find(
+		({ usage }) => usage.limitWindowSeconds === SEVEN_DAY_WINDOW_SECONDS,
+	)?.usage;
+
+	const unclassified = windows.filter(
+		({ usage }) => usage !== primary && usage !== secondary,
+	);
+	primary ??=
+		unclassified.find(({ source }) => source === "primary")?.usage ??
+		unclassified[0]?.usage;
+	secondary ??=
+		unclassified.find(
+			({ source, usage }) => source === "secondary" && usage !== primary,
+		)?.usage ?? unclassified.find(({ usage }) => usage !== primary)?.usage;
+
+	return { primary, secondary };
+}
+
 export function parseCodexUsageResponse(
 	data: WhamUsageResponse,
 ): Omit<CodexUsageSnapshot, "fetchedAt"> {
+	const windows = classifyUsageWindows(data.rate_limit);
 	return {
-		primary: parseUsageWindow(data.rate_limit?.primary_window),
-		secondary: parseUsageWindow(data.rate_limit?.secondary_window),
+		...windows,
 		planType: typeof data.plan_type === "string" ? data.plan_type : undefined,
 	};
 }

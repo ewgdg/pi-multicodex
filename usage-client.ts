@@ -4,8 +4,8 @@ import { type CodexUsageSnapshot, parseCodexUsageResponse } from "./usage";
 interface WhamUsageResponse {
 	plan_type?: string;
 	rate_limit?: {
-		primary_window?: WhamUsageWindow;
-		secondary_window?: WhamUsageWindow;
+		primary_window?: WhamUsageWindow | null;
+		secondary_window?: WhamUsageWindow | null;
 	};
 }
 
