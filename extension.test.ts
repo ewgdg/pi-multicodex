@@ -9,8 +9,8 @@ const mocks = vi.hoisted(() => ({
 	startPiAuthWatch: vi.fn(),
 	stopPiAuthWatch: vi.fn(),
 	statusRefreshFor: vi.fn(),
-	statusStartAutoRefresh: vi.fn(),
-	statusStopAutoRefresh: vi.fn(),
+	statusStartSession: vi.fn(),
+	statusStopSession: vi.fn(),
 	statusLoadPreferences: vi.fn().mockResolvedValue(undefined),
 	statusScheduleModelSelectRefresh: vi.fn(),
 }));
@@ -42,8 +42,8 @@ vi.mock("./status", () => ({
 		loadPreferences: mocks.statusLoadPreferences,
 		refreshFor: mocks.statusRefreshFor,
 		scheduleModelSelectRefresh: mocks.statusScheduleModelSelectRefresh,
-		startAutoRefresh: mocks.statusStartAutoRefresh,
-		stopAutoRefresh: mocks.statusStopAutoRefresh,
+		startSession: mocks.statusStartSession,
+		stopSession: mocks.statusStopSession,
 	}),
 }));
 
@@ -75,8 +75,8 @@ describe("multicodexExtension", () => {
 		mocks.startPiAuthWatch.mockClear();
 		mocks.stopPiAuthWatch.mockClear();
 		mocks.statusRefreshFor.mockClear();
-		mocks.statusStartAutoRefresh.mockClear();
-		mocks.statusStopAutoRefresh.mockClear();
+		mocks.statusStartSession.mockClear();
+		mocks.statusStopSession.mockClear();
 		mocks.statusLoadPreferences.mockClear();
 		mocks.statusScheduleModelSelectRefresh.mockClear();
 	});
@@ -182,7 +182,7 @@ describe("multicodexExtension", () => {
 		expect(mocks.resetSessionWarnings).toHaveBeenCalledOnce();
 		expect(mocks.handleSessionStart).not.toHaveBeenCalled();
 		expect(mocks.handleNewSessionSwitch).not.toHaveBeenCalled();
-		expect(mocks.statusStartAutoRefresh).toHaveBeenCalledOnce();
+		expect(mocks.statusStartSession).toHaveBeenCalledOnce();
 		expect(mocks.statusRefreshFor).toHaveBeenCalledWith(ctx);
 	});
 
@@ -239,7 +239,7 @@ describe("multicodexExtension", () => {
 		release();
 		await running;
 
-		expect(mocks.statusStartAutoRefresh).not.toHaveBeenCalled();
+		expect(mocks.statusStartSession).not.toHaveBeenCalled();
 		expect(mocks.statusLoadPreferences).not.toHaveBeenCalled();
 	});
 
@@ -272,8 +272,8 @@ describe("multicodexExtension", () => {
 		release();
 		await runningB;
 
-		expect(mocks.statusStopAutoRefresh).not.toHaveBeenCalled();
-		expect(mocks.statusStartAutoRefresh).toHaveBeenCalledTimes(2);
+		expect(mocks.statusStopSession).not.toHaveBeenCalled();
+		expect(mocks.statusStartSession).toHaveBeenCalledTimes(2);
 		expect(mocks.statusLoadPreferences).toHaveBeenCalledTimes(2);
 	});
 
@@ -297,7 +297,7 @@ describe("multicodexExtension", () => {
 
 		expect(mocks.statusRefreshFor).toHaveBeenCalledTimes(2);
 		expect(mocks.statusScheduleModelSelectRefresh).not.toHaveBeenCalled();
-		expect(mocks.statusStopAutoRefresh).toHaveBeenCalledWith(ctxB);
+		expect(mocks.statusStopSession).toHaveBeenCalledWith(ctxB);
 	});
 
 	it("ignores stale ctx events whose session getters throw", async () => {
@@ -327,7 +327,7 @@ describe("multicodexExtension", () => {
 
 		expect(mocks.statusRefreshFor).toHaveBeenCalledOnce();
 		expect(mocks.statusScheduleModelSelectRefresh).not.toHaveBeenCalled();
-		expect(mocks.statusStopAutoRefresh).not.toHaveBeenCalled();
+		expect(mocks.statusStopSession).not.toHaveBeenCalled();
 	});
 
 	it("ignores stale ctx events after active session is cleared", async () => {
@@ -358,7 +358,7 @@ describe("multicodexExtension", () => {
 
 		expect(mocks.statusRefreshFor).toHaveBeenCalledOnce();
 		expect(mocks.statusScheduleModelSelectRefresh).not.toHaveBeenCalled();
-		expect(mocks.statusStopAutoRefresh).toHaveBeenCalledOnce();
+		expect(mocks.statusStopSession).toHaveBeenCalledOnce();
 	});
 
 	it("drops async warnings after session shutdown", async () => {
@@ -410,7 +410,7 @@ describe("multicodexExtension", () => {
 		expect(mocks.resetSessionWarnings).toHaveBeenCalledTimes(1);
 		expect(mocks.handleSessionStart).toHaveBeenCalledOnce();
 		expect(mocks.handleNewSessionSwitch).not.toHaveBeenCalled();
-		expect(mocks.statusStartAutoRefresh).toHaveBeenCalledOnce();
+		expect(mocks.statusStartSession).toHaveBeenCalledOnce();
 		await vi.waitFor(() => {
 			expect(mocks.statusLoadPreferences).toHaveBeenCalledTimes(1);
 			expect(mocks.statusRefreshFor).toHaveBeenCalledTimes(1);
@@ -419,7 +419,7 @@ describe("multicodexExtension", () => {
 		await sessionStart?.({ reason: "new" }, ctx as never);
 		expect(mocks.resetSessionWarnings).toHaveBeenCalledTimes(2);
 		expect(mocks.handleNewSessionSwitch).toHaveBeenCalledOnce();
-		expect(mocks.statusStartAutoRefresh).toHaveBeenCalledTimes(2);
+		expect(mocks.statusStartSession).toHaveBeenCalledTimes(2);
 		await vi.waitFor(() => {
 			expect(mocks.statusLoadPreferences).toHaveBeenCalledTimes(2);
 			expect(mocks.statusRefreshFor).toHaveBeenCalledTimes(2);
@@ -431,6 +431,6 @@ describe("multicodexExtension", () => {
 		expect(mocks.statusScheduleModelSelectRefresh).toHaveBeenCalledWith(ctx);
 
 		sessionShutdown?.({}, ctx as never);
-		expect(mocks.statusStopAutoRefresh).toHaveBeenCalledWith(ctx);
+		expect(mocks.statusStopSession).toHaveBeenCalledWith(ctx);
 	});
 });

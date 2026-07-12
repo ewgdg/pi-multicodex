@@ -344,42 +344,26 @@ describe("createUsageStatusController", () => {
 		expect(refreshUsageForAccount).not.toHaveBeenCalled();
 	});
 
-	it("drops a stale stored context during auto-refresh", async () => {
+	it("does not poll status while idle", async () => {
 		vi.useFakeTimers();
 		const setStatus = vi.fn();
-		let stale = false;
-		const ctx = {
-			get hasUI() {
-				if (stale) throw new Error("stale ctx");
-				return true;
-			},
-			get model() {
-				if (stale) throw new Error("stale ctx");
-				return { provider: "openai-codex" };
-			},
-			ui: {
-				setStatus,
-				notify: vi.fn(),
-				theme: {
-					fg: (_token: string, text: string) => text,
-					bold: (text: string) => text,
-				},
-			},
-		};
+		const refreshUsageForAccount = vi.fn().mockResolvedValue({ fetchedAt: 0 });
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
 			getActiveAccount: () => ({ email: "a@example.com" }),
 			getCachedUsage: vi.fn(),
-			refreshUsageForAccount: vi.fn().mockResolvedValue({ fetchedAt: 0 }),
+			refreshUsageForAccount,
 		} as never);
+		const ctx = createContext({ setStatus });
 
-		await controller.refreshFor(ctx as never);
-		controller.startAutoRefresh();
-		stale = true;
+		await controller.refreshFor(ctx);
+		expect(refreshUsageForAccount).toHaveBeenCalledOnce();
+		controller.startSession();
 		setStatus.mockClear();
 
 		await vi.advanceTimersByTimeAsync(60_000);
 
+		expect(refreshUsageForAccount).toHaveBeenCalledOnce();
 		expect(setStatus).not.toHaveBeenCalled();
 	});
 
@@ -454,7 +438,7 @@ describe("createUsageStatusController", () => {
 		await vi.waitFor(() =>
 			expect(refreshUsageForAccount).toHaveBeenCalledOnce(),
 		);
-		controller.stopAutoRefresh(ctx);
+		controller.stopSession(ctx);
 		setStatus.mockClear();
 		resolveUsage?.({
 			primary: { usedPercent: 10, resetAt: 1 },

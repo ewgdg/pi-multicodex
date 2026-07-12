@@ -22,7 +22,6 @@ import { type CodexUsageSnapshot, formatResetAt } from "./usage";
 const STATUS_KEY = "multicodex-usage";
 const SETTINGS_KEY = "pi-multicodex";
 const SETTINGS_FILE = getAgentSettingsPath();
-const REFRESH_INTERVAL_MS = 60_000;
 const MODEL_SELECT_REFRESH_DEBOUNCE_MS = 250;
 const UNKNOWN_PERCENT = "--";
 const BRAND_LABEL = "Codex";
@@ -387,7 +386,6 @@ function applyPreferenceChange(
 }
 
 export function createUsageStatusController(accountManager: AccountManager) {
-	let refreshTimer: ReturnType<typeof setInterval> | undefined;
 	let modelSelectTimer: ReturnType<typeof setTimeout> | undefined;
 	let activeContext: ExtensionContext | undefined;
 	let isRunning = true;
@@ -575,24 +573,14 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		modelSelectTimer.unref?.();
 	}
 
-	function startAutoRefresh(): void {
+	function startSession(): void {
 		isRunning = true;
 		lifecycleVersion += 1;
-		if (refreshTimer) clearInterval(refreshTimer);
-		refreshTimer = setInterval(() => {
-			if (!activeContext || !isRunning) return;
-			void refreshFor(activeContext);
-		}, REFRESH_INTERVAL_MS);
-		refreshTimer.unref?.();
 	}
 
-	function stopAutoRefresh(ctx?: ExtensionContext): void {
+	function stopSession(ctx?: ExtensionContext): void {
 		isRunning = false;
 		lifecycleVersion += 1;
-		if (refreshTimer) {
-			clearInterval(refreshTimer);
-			refreshTimer = undefined;
-		}
 		if (modelSelectTimer) {
 			clearTimeout(modelSelectTimer);
 			modelSelectTimer = undefined;
@@ -692,8 +680,8 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		openPreferencesPanel,
 		refreshFor,
 		scheduleModelSelectRefresh,
-		startAutoRefresh,
-		stopAutoRefresh,
+		startSession,
+		stopSession,
 		getPreferences: () => preferences,
 	};
 }

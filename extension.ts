@@ -146,7 +146,7 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 				accountManager.stopPiAuthWatch();
 			}
 			if (!isCurrentContext(ctx, version)) return;
-			statusController.startAutoRefresh();
+			statusController.startSession();
 			await statusController.loadPreferences(ctx);
 			if (!isCurrentContext(ctx, version)) return;
 			await statusController.refreshFor(ctx);
@@ -185,6 +185,6 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		activeModelProvider = undefined;
 		managedStartupInitialized = false;
 		accountManager.stopPiAuthWatch();
-		statusController.stopAutoRefresh(ctx);
+		statusController.stopSession(ctx);
 	});
 }
