@@ -9,7 +9,7 @@ A signal that a Codex model response completed and may have consumed account quo
 _Avoid_: Turn-end event, subagent usage event
 
 **Pending usage invalidation**:
-Knowledge retained by connected runtimes and the Usage Broker that quota may have been consumed after the refresh work represented by the newest snapshot began. Signals coalesce, and the pending invalidation becomes refresh-eligible when that snapshot loses freshness.
+Durable knowledge that quota may have been consumed after the refresh work represented by the newest snapshot began. Signals coalesce, and the pending invalidation becomes refresh-eligible when that snapshot loses freshness.
 _Avoid_: Dirty cache, immediate expiration
 
 **Usage snapshot**:
@@ -32,17 +32,13 @@ _Avoid_: Process tree, launcher group
 The trimmed, lowercase account email used across credential changes, removal, and later re-addition. OpenAI account ID does not alter this identity; a different email is a different managed account.
 _Avoid_: OpenAI account ID, display email
 
-**Usage Broker**:
-An auto-spawned, ephemeral local process that coordinates credential-free usage snapshots, invalidation, retry suppression, and refresh assignments for one usage coordination scope. It exits when no runtimes remain connected.
-_Avoid_: Persistent daemon, shared Usage Coordinator
-
-**Broker usage state**:
-Credential-free usage snapshots and refresh coordination metadata held in memory by the Usage Broker and reconstructed from connected runtimes after broker restart.
-_Avoid_: Durable usage state, shared account storage
+**Shared usage state**:
+Durable, credential-free usage snapshots and refresh coordination metadata shared within one usage coordination scope. Each managed account identity has one mutable state document.
+_Avoid_: Shared coordinator, shared account storage
 
 **Locally available snapshot**:
-A validated usage snapshot retained by one process while the Usage Broker is unavailable or restarting. It may seed reconstructed broker state after reconnection.
-_Avoid_: Broker-accepted snapshot, durable snapshot
+A validated usage snapshot usable by one process when cross-process publication fails. It does not renew shared freshness and may be superseded during later reconciliation.
+_Avoid_: Accepted shared snapshot, successful publication
 
 **Active usage monitoring**:
 Refreshing usage snapshots while Codex responses are actively consuming quota, without polling during idle periods.
@@ -68,9 +64,9 @@ _Avoid_: Shared observer, global subscriber
 Refresh work for the same managed account identity whose result can satisfy another request, regardless of which runtime started it.
 _Avoid_: Shared promise, owner process work
 
-**Superseded refresh attempt**:
-Refresh work whose ownership was validly succeeded during stale-owner recovery. Its result can never become accepted, even if it completes after its successor.
-_Avoid_: Late winner, newest completion
+**Refresh lease**:
+An expiring per-account filesystem claim that suppresses duplicate refresh work during normal operation. It is not strict ownership: stale recovery may overlap a resumed owner, and the last published state may temporarily win.
+_Avoid_: File lock, correctness boundary
 
 **Retry suppression**:
 A short shared period after failed refresh work during which automatic requests retain stale status without starting another API call. It does not make a snapshot fresh, and forced requests bypass it.
