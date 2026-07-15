@@ -20,6 +20,8 @@ pnpm prototype:usage-coordination --all
 
 The prototype uses real Node child processes and a retained temporary directory. Every protocol action emits the complete account-scope filesystem view, followed by each scenario's final state and verdict.
 
+Shared state deliberately has no schema-version field. Known coordination fields are validated, while additive unknown fields are preserved during read-merge-publish mutations.
+
 ## Deliberate limits
 
 - Local filesystems only; NFS, SMB, and virtualization-mounted coordination roots are outside the question.

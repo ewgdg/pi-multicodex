@@ -27,7 +27,6 @@ import { basename, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
-const PROTOCOL_VERSION = 1;
 const QUESTION =
 	"Can short filesystem leases plus atomic state replacement usually coalesce cross-process usage refreshes while recovering inspectably from crashes, suspension, malformed state, missed hints, and rename failure?";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -77,12 +76,7 @@ async function readState(scope) {
 	try {
 		const raw = await readFile(join(scope, "state.json"), "utf8");
 		const parsed = JSON.parse(raw);
-		if (
-			typeof parsed !== "object" ||
-			parsed === null ||
-			Array.isArray(parsed) ||
-			parsed.protocolVersion !== PROTOCOL_VERSION
-		) {
+		if (!validKnownState(parsed)) {
 			return { state: undefined, status: "malformed", raw };
 		}
 		return { state: parsed, status: "valid", raw };
@@ -97,6 +91,50 @@ async function readState(scope) {
 		}
 		throw error;
 	}
+}
+
+function isRecord(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value) {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+function validKnownState(value) {
+	if (!isRecord(value)) return false;
+	if (
+		"snapshot" in value &&
+		(!isRecord(value.snapshot) ||
+			!isFiniteNumber(value.snapshot.fetchedAt) ||
+			typeof value.snapshot.attemptToken !== "string" ||
+			("usagePercent" in value.snapshot &&
+				!isFiniteNumber(value.snapshot.usagePercent)))
+	) {
+		return false;
+	}
+	if (
+		"pendingInvalidation" in value &&
+		(!isRecord(value.pendingInvalidation) ||
+			typeof value.pendingInvalidation.token !== "string" ||
+			!isFiniteNumber(value.pendingInvalidation.recordedAt))
+	) {
+		return false;
+	}
+	if (
+		"lastRefresh" in value &&
+		(!isRecord(value.lastRefresh) ||
+			typeof value.lastRefresh.token !== "string" ||
+			!isFiniteNumber(value.lastRefresh.startedAt) ||
+			!isFiniteNumber(value.lastRefresh.completedAt) ||
+			!["success", "failure"].includes(value.lastRefresh.outcome))
+	) {
+		return false;
+	}
+	if ("retryNotBefore" in value && !isFiniteNumber(value.retryNotBefore)) {
+		return false;
+	}
+	return true;
 }
 
 async function filesystemView(scope) {
@@ -128,7 +166,7 @@ async function filesystemView(scope) {
 async function emitEvent(eventsPath, scope, action, details = {}) {
 	if (!eventsPath) return;
 	const event = {
-		at: new Date().toISOString(),
+		at: Date.now(),
 		pid: process.pid,
 		action,
 		...details,
@@ -167,24 +205,32 @@ async function cleanAgedDebris(scope, eventsPath) {
 	}
 }
 
-function validLease(value) {
+function validLease(value, name) {
+	if (
+		!isRecord(value) ||
+		typeof value.token !== "string" ||
+		!isFiniteNumber(value.acquiredAt) ||
+		!isFiniteNumber(value.expiresAt)
+	) {
+		return false;
+	}
+	const allowedKeys = new Set(["token", "acquiredAt", "expiresAt"]);
+	if (name === "refresh.lease") allowedKeys.add("capturedInvalidationToken");
+	if (Object.keys(value).some((key) => !allowedKeys.has(key))) return false;
 	return (
-		typeof value === "object" &&
-		value !== null &&
-		value.protocolVersion === PROTOCOL_VERSION &&
-		typeof value.token === "string" &&
-		typeof value.expiresAt === "number"
+		!("capturedInvalidationToken" in value) ||
+		typeof value.capturedInvalidationToken === "string"
 	);
 }
 
-async function inspectExistingLease(path) {
+async function inspectExistingLease(path, name) {
 	try {
 		const metadata = await stat(path);
 		try {
 			const lease = JSON.parse(await readFile(path, "utf8"));
 			return {
-				lease: validLease(lease) ? lease : undefined,
-				stale: validLease(lease)
+				lease: validLease(lease, name) ? lease : undefined,
+				stale: validLease(lease, name)
 					? Date.now() > lease.expiresAt
 					: Date.now() - metadata.mtimeMs > LEASE_INITIALIZATION_GRACE_MS,
 			};
@@ -200,19 +246,25 @@ async function inspectExistingLease(path) {
 	}
 }
 
-async function tryAcquireLease(scope, name, durationMs, mode, eventsPath) {
+async function tryAcquireLease(
+	scope,
+	name,
+	durationMs,
+	eventsPath,
+	{ mode, capturedInvalidationToken } = {},
+) {
 	await mkdir(scope, { recursive: true });
 	const path = join(scope, name);
 	const token = randomUUID();
 	const acquiredAt = Date.now();
 	const record = {
-		protocolVersion: PROTOCOL_VERSION,
-		kind: name,
 		token,
-		mode,
 		acquiredAt,
 		expiresAt: acquiredAt + durationMs,
 	};
+	if (name === "refresh.lease" && capturedInvalidationToken) {
+		record.capturedInvalidationToken = capturedInvalidationToken;
+	}
 
 	try {
 		const handle = await open(path, "wx");
@@ -228,7 +280,7 @@ async function tryAcquireLease(scope, name, durationMs, mode, eventsPath) {
 		if (error?.code !== "EEXIST") throw error;
 	}
 
-	const existing = await inspectExistingLease(path);
+	const existing = await inspectExistingLease(path, name);
 	if (!existing.stale) return { owner: false, path, record: existing.lease };
 
 	const quarantineName = `${name}.quarantine-${randomUUID()}`;
@@ -282,7 +334,6 @@ async function acquireStateWriteLease(scope, durationMs, eventsPath) {
 			scope,
 			"state-write.lease",
 			durationMs,
-			"read-merge-publish",
 			eventsPath,
 		);
 		if (lease.owner) return lease;
@@ -304,6 +355,11 @@ async function syncDirectoryBestEffort(directory) {
 }
 
 async function publishState(scope, state, injectRenameFailure, eventsPath) {
+	if (!validKnownState(state)) {
+		throw new Error(
+			"prototype refused to publish malformed known state fields",
+		);
+	}
 	const canonicalPath = join(scope, "state.json");
 	const temporaryPath = join(scope, `state.json.tmp-${randomUUID()}`);
 	let handle;
@@ -350,9 +406,7 @@ async function mutateState(
 				raw: current.raw,
 			});
 		}
-		const next = await mutator(
-			current.state ?? { protocolVersion: PROTOCOL_VERSION },
-		);
+		const next = await mutator(current.state ?? {});
 		await publishState(scope, next, injectRenameFailure, eventsPath);
 		await emitEvent(eventsPath, scope, "state-published", { state: next });
 		return next;
@@ -367,14 +421,14 @@ async function invalidate(scope, options) {
 		scope,
 		(state) => ({
 			...state,
-			pendingInvalidation: { token, at: new Date().toISOString() },
+			pendingInvalidation: { token, recordedAt: Date.now() },
 		}),
 		options,
 	);
 }
 
 async function seedSnapshot(scope, options) {
-	const now = new Date().toISOString();
+	const now = Date.now();
 	return mutateState(
 		scope,
 		(state) => ({
@@ -383,7 +437,7 @@ async function seedSnapshot(scope, options) {
 			snapshot: {
 				usagePercent: Number(options.usagePercent ?? 7),
 				fetchedAt: now,
-				refreshToken: "seed",
+				attemptToken: "seed",
 			},
 			lastRefresh: {
 				token: "seed",
@@ -398,7 +452,7 @@ async function seedSnapshot(scope, options) {
 
 function isFresh(state) {
 	if (!state?.snapshot?.fetchedAt) return false;
-	return Date.now() - Date.parse(state.snapshot.fetchedAt) < SNAPSHOT_FRESH_MS;
+	return Date.now() - state.snapshot.fetchedAt < SNAPSHOT_FRESH_MS;
 }
 
 async function refresh(scope, options) {
@@ -415,14 +469,28 @@ async function refresh(scope, options) {
 		});
 		return "fresh";
 	}
+	if (
+		mode === "automatic" &&
+		baseline.state?.retryNotBefore &&
+		baseline.state.retryNotBefore > Date.now()
+	) {
+		await emitEvent(options.eventsPath, scope, "retry-suppression-observed", {
+			mode,
+			retryNotBefore: baseline.state.retryNotBefore,
+		});
+		return "retry-suppressed";
+	}
 
 	while (true) {
+		const beforeAcquisition = await readState(scope);
+		const capturedInvalidationToken =
+			beforeAcquisition.state?.pendingInvalidation?.token;
 		const lease = await tryAcquireLease(
 			scope,
 			"refresh.lease",
 			leaseMs,
-			mode,
 			options.eventsPath,
+			{ mode, capturedInvalidationToken },
 		);
 		if (!lease.owner) {
 			await emitEvent(options.eventsPath, scope, "compatible-refresh-joined", {
@@ -434,7 +502,7 @@ async function refresh(scope, options) {
 			if (
 				reconciled.state?.lastRefresh?.token &&
 				reconciled.state.lastRefresh.token !== baselineRefreshToken &&
-				Date.parse(reconciled.state.lastRefresh.completedAt) >= requestStartedAt
+				reconciled.state.lastRefresh.completedAt >= requestStartedAt
 			) {
 				await emitEvent(options.eventsPath, scope, "joined-refresh-observed", {
 					mode,
@@ -449,8 +517,7 @@ async function refresh(scope, options) {
 		if (
 			afterAcquisition.state?.lastRefresh?.token &&
 			afterAcquisition.state.lastRefresh.token !== baselineRefreshToken &&
-			Date.parse(afterAcquisition.state.lastRefresh.completedAt) >=
-				requestStartedAt
+			afterAcquisition.state.lastRefresh.completedAt >= requestStartedAt
 		) {
 			await emitEvent(
 				options.eventsPath,
@@ -466,20 +533,20 @@ async function refresh(scope, options) {
 		}
 
 		const refreshToken = lease.record.token;
-		const capturedInvalidationToken =
-			afterAcquisition.state?.pendingInvalidation?.token;
-		const startedAt = new Date().toISOString();
+		const leaseCapturedInvalidationToken =
+			lease.record.capturedInvalidationToken;
+		const startedAt = Date.now();
 		await emitEvent(options.eventsPath, scope, "simulated-fetch-started", {
 			mode,
 			refreshToken,
-			capturedInvalidationToken,
+			capturedInvalidationToken: leaseCapturedInvalidationToken,
 			fetchMs,
 		});
 		await sleep(fetchMs);
 
 		try {
 			if (options.failFetch) {
-				const completedAt = new Date().toISOString();
+				const completedAt = Date.now();
 				await mutateState(
 					scope,
 					(state) => ({
@@ -490,14 +557,14 @@ async function refresh(scope, options) {
 							completedAt,
 							outcome: "failure",
 						},
-						retryNotBefore: new Date(Date.now() + 1_000).toISOString(),
+						retryNotBefore: Date.now() + 1_000,
 					}),
 					options,
 				);
 				return "failed";
 			}
 
-			const completedAt = new Date().toISOString();
+			const completedAt = Date.now();
 			await mutateState(
 				scope,
 				(state) => {
@@ -506,7 +573,7 @@ async function refresh(scope, options) {
 						snapshot: {
 							usagePercent: Number(options.usagePercent ?? 42),
 							fetchedAt: completedAt,
-							refreshToken,
+							attemptToken: refreshToken,
 						},
 						lastRefresh: {
 							token: refreshToken,
@@ -516,7 +583,9 @@ async function refresh(scope, options) {
 						},
 					};
 					delete next.retryNotBefore;
-					if (state.pendingInvalidation?.token === capturedInvalidationToken) {
+					if (
+						state.pendingInvalidation?.token === leaseCapturedInvalidationToken
+					) {
 						delete next.pendingInvalidation;
 					}
 					return next;
@@ -697,6 +766,11 @@ async function invalidationDuringRefresh(runRoot) {
 		runRoot,
 		"02-invalidation-during-refresh",
 	);
+	await runWorker("invalidate", workerOptions(scenario));
+	const beforeRefresh = await readState(
+		scopeDirectory(scenario.root, DEFAULT_EMAIL),
+	);
+	const capturedToken = beforeRefresh.state?.pendingInvalidation?.token;
 	const refreshWorker = startWorker(
 		"refresh",
 		workerOptions(scenario, DEFAULT_EMAIL, {
@@ -704,7 +778,7 @@ async function invalidationDuringRefresh(runRoot) {
 			"lease-ms": 1_500,
 		}),
 	);
-	await waitForEvent(
+	const fetchStarted = await waitForEvent(
 		scenario.events,
 		(event) => event.action === "simulated-fetch-started",
 	);
@@ -717,8 +791,11 @@ async function invalidationDuringRefresh(runRoot) {
 		scopes: [scopeDirectory(scenario.root, DEFAULT_EMAIL)],
 		verdict: verdict(
 			refreshResult.code === 0 &&
-				Boolean(final.state?.pendingInvalidation?.token),
-			`pending token: ${final.state?.pendingInvalidation?.token ?? "missing"}`,
+				fetchStarted.view.files["refresh.lease"]?.capturedInvalidationToken ===
+					capturedToken &&
+				Boolean(final.state?.pendingInvalidation?.token) &&
+				final.state.pendingInvalidation.token !== capturedToken,
+			`lease captured: ${capturedToken}; newer pending token: ${final.state?.pendingInvalidation?.token ?? "missing"}`,
 		),
 	};
 }
