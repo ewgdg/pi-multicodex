@@ -60,7 +60,8 @@
 		"tsgo": "tsgo -p tsconfig.json",
 		"generate:schema": "bun scripts/generate-schema.ts",
 		"check": "pnpm lint && pnpm tsgo && pnpm test",
-		"pack:dry": "npm pack --dry-run"
+		"pack:dry": "npm pack --dry-run",
+		"prototype:usage-coordination": "node prototypes/filesystem-usage-coordination/prototype.mjs"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
