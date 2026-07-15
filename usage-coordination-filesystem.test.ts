@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { FSWatcher } from "node:fs";
 import {
+	chmod,
 	mkdir,
 	mkdtemp,
 	readdir,
@@ -199,6 +200,43 @@ describe("filesystem shared usage coordination", () => {
 		expect(JSON.stringify(adapter.getDiagnostics())).not.toContain(
 			"person@example.com",
 		);
+	});
+
+	it("falls back locally when an expired refresh lease cannot be quarantined", async () => {
+		const root = await temporaryRoot();
+		const now = 10_000;
+		const adapter = coordination(root, {
+			now: () => now,
+			policy: policy({ refreshAcquisitionTimeoutMs: 20 }),
+		});
+		const scope = join(root, deriveManagedAccountDigest("person@example.com"));
+		await mkdir(scope, { recursive: true });
+		await writeFile(
+			join(scope, "refresh.lease"),
+			JSON.stringify({
+				token: "stale-owner",
+				acquiredAt: now - 100,
+				expiresAt: now - 1,
+			}),
+			"utf8",
+		);
+		await chmod(scope, 0o555);
+		try {
+			const fetcher = vi.fn(async () => snapshot(now, 73));
+			const result = await adapter.refresh("person@example.com", fetcher, {
+				force: true,
+			});
+
+			expect(fetcher).toHaveBeenCalledOnce();
+			expect(result).toMatchObject({
+				availability: "locally-available",
+				source: "local-fallback",
+				snapshot: { primary: { usedPercent: 73 } },
+				warning: { code: "permission" },
+			});
+		} finally {
+			await chmod(scope, 0o755);
+		}
 	});
 
 	it("bounds waiting for compatible refresh work without duplicating the fetch", async () => {

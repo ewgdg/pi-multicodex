@@ -259,8 +259,10 @@ export class FilesystemCoordinationStorage {
 			await rename(path, quarantinePath);
 			this.recordDiagnostic("lease-recovery", scope, { lease: name });
 		} catch (error) {
-			if (!isErrnoException(error) || error.code !== "ENOENT") {
+			if (isErrnoException(error) && error.code === "ENOENT") {
 				// Another contender may have recovered the same advisory lease.
+			} else {
+				throw error;
 			}
 		}
 		return undefined;
