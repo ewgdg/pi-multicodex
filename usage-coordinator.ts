@@ -190,14 +190,19 @@ export class UsageCoordinator {
 			controller,
 		);
 		entry.inFlight = { promise, controller };
-		void promise.finally(() => {
+		const finishRefresh = () => {
 			if (entry.inFlight?.promise !== promise) return;
 			entry.inFlight = undefined;
-			void this.reconcileEntry(entry).finally(() => {
-				if (this.entries.get(getUsageKey(entry.account)) !== entry) return;
-				this.scheduleConsumptionRefresh(entry);
-			});
-		});
+		};
+		this.ignoreDetachedRejection(
+			promise
+				.then(finishRefresh, finishRefresh)
+				.then(() => this.reconcileEntry(entry))
+				.then(() => {
+					if (this.entries.get(getUsageKey(entry.account)) !== entry) return;
+					this.scheduleConsumptionRefresh(entry);
+				}),
+		);
 		return this.waitForWork(promise, request.signal, true);
 	}
 
@@ -243,7 +248,7 @@ export class UsageCoordinator {
 		this.entries.set(key, entry);
 		if (this.activeObserverCount > 0) {
 			this.subscribeEntry(entry);
-			void this.reconcileEntry(entry);
+			this.ignoreDetachedRejection(this.reconcileEntry(entry));
 		}
 		return entry;
 	}
@@ -377,9 +382,13 @@ export class UsageCoordinator {
 			) {
 				return;
 			}
-			void this.refresh(entry.account, entry.fetcher).then(() => undefined);
+			this.ignoreDetachedRejection(this.refresh(entry.account, entry.fetcher));
 		}, delay);
 		entry.consumptionTimer.unref?.();
+	}
+
+	private ignoreDetachedRejection(work: Promise<unknown>): void {
+		void work.catch(() => undefined);
 	}
 
 	private waitForWork(
@@ -401,7 +410,7 @@ export class UsageCoordinator {
 	private startObserverWork(): void {
 		for (const entry of this.entries.values()) {
 			this.subscribeEntry(entry);
-			void this.reconcileEntry(entry);
+			this.ignoreDetachedRejection(this.reconcileEntry(entry));
 		}
 		this.lastReconciliationAt = this.now();
 		this.scheduleSafetyReconciliation();
@@ -443,7 +452,7 @@ export class UsageCoordinator {
 				previous !== undefined &&
 				now - previous >= this.sharedCoordination.policy.sleepDetectionMs;
 			for (const entry of this.entries.values()) {
-				void this.reconcileEntry(entry);
+				this.ignoreDetachedRejection(this.reconcileEntry(entry));
 				if (likelySleep) this.clearConsumptionTimer(entry);
 			}
 			this.scheduleSafetyReconciliation();

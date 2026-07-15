@@ -13,6 +13,22 @@ const snapshot = (fetchedAt: number, usedPercent = 10): CodexUsageSnapshot => ({
 	fetchedAt,
 });
 
+async function expectNoUnhandledRejection(
+	work: () => Promise<void>,
+): Promise<void> {
+	const rejections: unknown[] = [];
+	const onUnhandledRejection = (reason: unknown) => rejections.push(reason);
+	process.on("unhandledRejection", onUnhandledRejection);
+	try {
+		await work();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(rejections).toEqual([]);
+	} finally {
+		process.off("unhandledRejection", onUnhandledRejection);
+	}
+}
+
 describe("UsageCoordinator", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
@@ -288,5 +304,21 @@ describe("UsageCoordinator", () => {
 		expect(coordinator.getCachedUsage(value)).toBeUndefined();
 		await coordinator.reconcile(account(" READD@example.com "));
 		expect(coordinator.getCachedUsage(value)?.primary?.usedPercent).toBe(44);
+	});
+
+	it("preserves foreground refresh rejection while handling detached cleanup", async () => {
+		const shared = createInMemoryUsageCoordination();
+		const error = new Error("shared refresh failed");
+		vi.spyOn(shared, "refresh").mockRejectedValue(error);
+		vi.spyOn(shared, "read").mockRejectedValue(error);
+		const coordinator = createUsageCoordinator({ sharedCoordination: shared });
+
+		await expectNoUnhandledRejection(async () => {
+			await expect(
+				coordinator.refresh(account("failure@example.com"), async () =>
+					snapshot(0),
+				),
+			).rejects.toBe(error);
+		});
 	});
 });
