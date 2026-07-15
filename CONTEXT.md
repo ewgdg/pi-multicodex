@@ -21,7 +21,7 @@ Whether the newest accepted usage snapshot is recent enough to satisfy an automa
 _Avoid_: Last-attempt freshness, cache validity
 
 **Usage Coordinator**:
-The authority that shares usage snapshots and coordinates refresh eligibility across sessions in one Pi runtime.
+The process-local authority for usage memory, promises, timers, observers, cancellation, and fetch ownership. It delegates credential-free cross-process state to a shared coordination adapter.
 _Avoid_: Footer controller, account-local usage cache
 
 **Usage coordination scope**:
@@ -43,6 +43,10 @@ _Avoid_: Cached error, snapshot status
 **Locally available snapshot**:
 A validated usage snapshot usable by one process when cross-process publication fails. It does not renew shared freshness and may be superseded during later reconciliation.
 _Avoid_: Accepted shared snapshot, successful publication
+
+**Usage availability**:
+The typed result of refresh or reconciliation: `fresh`, `stale`, `locally-available`, or `unavailable`. Availability is separate from the reason work was satisfied and from refresh outcome metadata.
+_Avoid_: Boolean success, snapshot presence as success
 
 **Active usage monitoring**:
 Refreshing usage snapshots while Codex responses are actively consuming quota, without polling during idle periods.

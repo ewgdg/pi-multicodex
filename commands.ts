@@ -27,6 +27,7 @@ import {
 } from "./status";
 import { type Account, STORAGE_FILE } from "./storage";
 import { isUsageUntouched } from "./usage";
+import { isFreshUsageConfirmation } from "./usage-coordination/index";
 
 const SETTINGS_FILE = getAgentSettingsPath();
 const NO_ACCOUNTS_MESSAGE =
@@ -305,10 +306,17 @@ async function refreshSingleAccount(
 		return;
 	}
 
-	await accountManager.refreshUsageForAccount(account, {
+	const result = await accountManager.refreshUsageForAccount(account, {
 		force: true,
 		warningHandler: (message) => ctx.ui.notify(message, "warning"),
 	});
+	if (!isFreshUsageConfirmation(result)) {
+		ctx.ui.notify(
+			`refresh ${email}: usage was not freshly confirmed (${result.availability}, ${result.source})`,
+			"warning",
+		);
+		return;
+	}
 	ctx.ui.notify(
 		`refreshed ${formatAccountStatusLine(accountManager, email, usageMode)}`,
 		"info",
@@ -319,17 +327,22 @@ async function refreshAllAccounts(
 	ctx: ExtensionCommandContext,
 	accountManager: AccountManager,
 ): Promise<void> {
-	await accountManager.refreshUsageForAllAccounts({
+	const results = await accountManager.refreshUsageForAllAccounts({
 		force: true,
 		warningHandler: (message) => ctx.ui.notify(message, "warning"),
 	});
 	const accounts = accountManager.getAccounts();
 	const needsReauth = accountManager.getAccountsNeedingReauth().length;
+	const outcomes = Object.values(results);
+	const fresh = outcomes.filter(isFreshUsageConfirmation).length;
+	const degraded = outcomes.length - fresh;
 	const summary =
 		accounts.length === 0
 			? NO_ACCOUNTS_MESSAGE
-			: `refreshed ${accounts.length} account(s); reauth needed=${needsReauth}`;
-	ctx.ui.notify(summary, needsReauth > 0 ? "warning" : "info");
+			: degraded === 0
+				? `refreshed ${fresh} account(s); reauth needed=${needsReauth}`
+				: `refresh: fresh=${fresh} degraded=${degraded}; reauth needed=${needsReauth}`;
+	ctx.ui.notify(summary, needsReauth > 0 || degraded > 0 ? "warning" : "info");
 }
 
 async function reauthenticateAccount(

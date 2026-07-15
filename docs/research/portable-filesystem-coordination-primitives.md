@@ -1,5 +1,7 @@
 # Portable filesystem coordination primitives
 
+> This research record predates the production contract. Current behavior is defined by issue #9 and the usage-coordination ADR.
+
 Research for [Evaluate portable filesystem coordination primitives](https://github.com/ewgdg/pi-multicodex/issues/2).
 
 ## Question

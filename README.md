@@ -106,7 +106,7 @@ You can customize which fields appear and their ordering with `/multicodex foote
 - **Provider override.** MultiCodex registers itself as the `openai-codex` provider. You do not need to select a different provider or change your model — it works with whatever Codex model you already use.
 - **Auth import.** When pi has stored Codex OAuth credentials, MultiCodex imports them automatically into the same managed account pool used by manually added accounts and labels that account as `pi auth` in the UI.
 - **Token refresh.** OAuth tokens are refreshed before expiry so requests do not fail due to stale credentials. You can also force a health refresh with `/multicodex refresh` or re-authenticate explicitly with `/multicodex reauth`.
-- **Usage tracking.** Usage snapshots are shared for the process runtime. While the interactive Codex footer is observed, consumption events drive refreshes with coalescing and a maximum of once per account every 30 seconds; there is no idle polling. When available, Codex plan metadata is used as a capacity hint for rotation scoring.
+- **Usage tracking.** Pi runtimes using the same agent directory share credential-free usage snapshots and normally coalesce per-account refresh work through advisory filesystem leases. Completed managed responses publish pending invalidation even in headless runtimes. Active observers reconcile at least every 30 seconds; there is no idle polling. When available, Codex plan metadata is used as a capacity hint for rotation scoring.
 - **Quota cooldown.** When an account is exhausted, it stays on cooldown until the exhausted or most constrained known reset window clears (or 1 hour if reset time is unknown).
 - **Self-contained utility seams.** Stream primitives and `~/.pi/agent/*` path helpers live under `shared/` so the published package does not depend on a separate utility package for runtime wiring. MultiCodex still owns account storage, token policy, footer behavior, and command UX.
 
@@ -135,6 +135,7 @@ MultiCodex stores all data locally under `~/.pi/agent/`:
 |---|---|
 | `codex-accounts.json` | Managed account credentials and state |
 | `settings.json` (key `pi-multicodex`) | Footer display preferences |
+| `state/multicodex/usage-coordination/<sha256>/` | Credential-free shared usage state and short advisory leases |
 
-No data is sent anywhere except to the Codex API endpoints for auth refresh and usage queries.
+Coordination paths use the full SHA-256 digest of the normalized account email; raw email addresses and credentials are never written to coordination artifacts. Coordination supports local filesystems only—NFS, SMB, and virtualization-mounted agent directories are outside its correctness contract. No data is sent anywhere except to the Codex API endpoints for auth refresh and usage queries.
 

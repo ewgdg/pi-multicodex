@@ -1,4 +1,4 @@
-export { AccountManager } from "./account-manager";
+export { AccountManager, type UsageRefreshOptions } from "./account-manager";
 export { parseImportedOpenAICodexAuth } from "./auth";
 export { default } from "./extension";
 export {
@@ -32,3 +32,10 @@ export {
 	PLAN_CAPACITY_MULTIPLIERS,
 	parseCodexUsageResponse,
 } from "./usage";
+export type {
+	UsageAvailability,
+	UsageCoordinationDiagnostic,
+	UsageCoordinationWarning,
+	UsageRefreshResult,
+	UsageRefreshSource,
+} from "./usage-coordination/index";

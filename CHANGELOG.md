@@ -72,7 +72,12 @@
 
 ### Features
 
+* share credential-free Codex usage state and normally coalesce refresh work across Pi runtimes using the same agent directory
 * merge account inspection and account actions into `/multicodex accounts`, with explicit refresh and re-authentication flows
+
+### Platform validation
+
+* the production coordination implementation is cross-platform by design and release-blocking on Linux; macOS and Windows evidence comes from the completed filesystem prototype, not production validation
 
 ### Bug Fixes
 

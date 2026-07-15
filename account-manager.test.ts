@@ -35,6 +35,10 @@ vi.mock("./usage-client", () => ({
 
 import { AccountManager } from "./account-manager";
 import {
+	createInMemoryUsageCoordination,
+	UsageAuthenticationError,
+} from "./usage-coordination/index";
+import {
 	resetUsageCoordinatorForTests,
 	USAGE_FRESHNESS_INTERVAL_MS,
 } from "./usage-coordinator";
@@ -789,6 +793,30 @@ describe("AccountManager quota cooldown reconciliation", () => {
 		expect(mocks.saveStorage).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps quota cooldown when healthy-looking usage is only locally available", async () => {
+		const sharedCoordination = createInMemoryUsageCoordination();
+		vi.spyOn(sharedCoordination, "refresh").mockResolvedValue({
+			availability: "locally-available",
+			source: "local-fallback",
+			snapshot: {
+				primary: { usedPercent: 0, allowed: true, limitReached: false },
+				secondary: { usedPercent: 0, allowed: true, limitReached: false },
+				fetchedAt: Date.now(),
+			},
+		});
+		resetUsageCoordinatorForTests(sharedCoordination);
+		const originalCooldown = mocks.storageData.accounts[0]
+			?.quotaExhaustedUntil as number;
+		const manager = new AccountManager();
+
+		const cleared = await manager.reconcileQuotaCooldowns();
+
+		expect(cleared).toBe(0);
+		expect(
+			manager.getAccount("cooldown@example.com")?.quotaExhaustedUntil,
+		).toBe(originalCooldown);
+	});
+
 	it.each([
 		[
 			"primary",
@@ -844,6 +872,28 @@ describe("AccountManager quota cooldown reconciliation", () => {
 			manager.getAccount("cooldown@example.com")?.quotaExhaustedUntil,
 		).toBe(originalCooldown);
 		expect(mocks.saveStorage).not.toHaveBeenCalled();
+	});
+
+	it("does not clear cooldown from a previously fresh snapshot after forced refresh failure", async () => {
+		const healthySnapshot = {
+			primary: { usedPercent: 0, allowed: true, limitReached: false },
+			secondary: { usedPercent: 0, allowed: true, limitReached: false },
+			fetchedAt: Date.now(),
+		};
+		mocks.fetchCodexUsage
+			.mockResolvedValueOnce(healthySnapshot)
+			.mockRejectedValueOnce(new Error("usage unavailable"));
+		const originalCooldown = mocks.storageData.accounts[0]
+			?.quotaExhaustedUntil as number;
+		const manager = new AccountManager();
+		const account = manager.getAccount("cooldown@example.com");
+		if (!account) throw new Error("account missing");
+		await manager.refreshUsageForAccount(account);
+
+		const cleared = await manager.reconcileQuotaCooldowns();
+
+		expect(cleared).toBe(0);
+		expect(account.quotaExhaustedUntil).toBe(originalCooldown);
 	});
 
 	it("keeps quota cooldown when usage refresh fails", async () => {
@@ -1010,7 +1060,7 @@ describe("AccountManager usage coordinator facade", () => {
 		expect(mocks.fetchCodexUsage).toHaveBeenCalledOnce();
 	});
 
-	it("uses account id identity when emails differ", async () => {
+	it("keeps different normalized emails isolated even when account ids match", async () => {
 		mocks.storageData.accounts = [
 			{
 				email: "first@example.com",
@@ -1041,7 +1091,33 @@ describe("AccountManager usage coordinator facade", () => {
 		const second = new AccountManager();
 		expect(
 			second.getCachedUsage("second@example.com")?.primary?.usedPercent,
-		).toBe(7);
+		).toBeUndefined();
+		const secondAccount = second.getAccount("second@example.com");
+		if (!secondAccount) throw new Error("account missing");
+		await second.refreshUsageForAccount(secondAccount);
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not suppress retry after usage endpoint authentication failure", async () => {
+		mocks.storageData.accounts = [
+			{
+				email: "auth-usage@example.com",
+				accessToken: "access",
+				refreshToken: "refresh",
+				expiresAt: Date.now() + 3_600_000,
+			},
+		];
+		mocks.fetchCodexUsage
+			.mockRejectedValueOnce(new UsageAuthenticationError("unauthorized"))
+			.mockResolvedValueOnce({ fetchedAt: Date.now() });
+		const manager = new AccountManager();
+		const account = manager.getAccount("auth-usage@example.com");
+		if (!account) throw new Error("account missing");
+
+		await manager.refreshUsageForAccount(account);
+		await manager.refreshUsageForAccount(account);
+
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledTimes(2);
 	});
 
 	it("records consumption through active observer without warning on monitor failure", async () => {
@@ -1113,9 +1189,11 @@ describe("AccountManager usage coordinator facade", () => {
 		vi.useRealTimers();
 	});
 
-	it("invalidates usage when an account is removed and immediately re-added", async () => {
+	it("forgets local usage while preserving shared continuity after re-addition", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(1_000);
+		const sharedCoordination = createInMemoryUsageCoordination();
+		resetUsageCoordinatorForTests(sharedCoordination);
 		mocks.fetchCodexUsage.mockReset();
 		mocks.storageData.accounts = [
 			{
@@ -1127,7 +1205,7 @@ describe("AccountManager usage coordinator facade", () => {
 			},
 		];
 		mocks.fetchCodexUsage
-			.mockResolvedValueOnce({ primary: { usedPercent: 10 }, fetchedAt: 0 })
+			.mockResolvedValueOnce({ primary: { usedPercent: 10 }, fetchedAt: 1_000 })
 			.mockResolvedValueOnce({
 				primary: { usedPercent: 20 },
 				fetchedAt: 1_000,
@@ -1139,14 +1217,27 @@ describe("AccountManager usage coordinator facade", () => {
 
 		await manager.refreshUsageForAccount(account);
 		manager.recordUsageConsumption(account);
+		await vi.waitFor(async () => {
+			expect(
+				(await sharedCoordination.read(account.email)).pendingInvalidation,
+			).toBeDefined();
+		});
 		expect(manager.removeAccount(account.email)).toBe(true);
 		manager.getAccounts().push({ ...account });
 
 		const readded = manager.getAccount(account.email);
 		if (!readded) throw new Error("re-added account missing");
 		expect(manager.getCachedUsage(readded.email)).toBeUndefined();
-		await manager.refreshUsageForAccount(readded);
-		expect(mocks.fetchCodexUsage).toHaveBeenCalledTimes(2);
+		expect(
+			(await sharedCoordination.read(readded.email)).snapshot?.primary
+				?.usedPercent,
+		).toBe(10);
+		const readdedResult = await manager.refreshUsageForAccount(readded);
+		expect(readdedResult.source).toBe("existing-fresh");
+		expect(manager.getCachedUsage(readded.email)?.primary?.usedPercent).toBe(
+			10,
+		);
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledOnce();
 
 		vi.advanceTimersByTime(USAGE_FRESHNESS_INTERVAL_MS);
 		await vi.runOnlyPendingTimersAsync();
@@ -1189,7 +1280,7 @@ describe("AccountManager usage coordinator facade", () => {
 		expect(manager.getCachedUsage(account.email)).toBeUndefined();
 	});
 
-	it("shares freshness after token validation mutates account identity", async () => {
+	it("keeps normalized-email freshness when token validation adds account metadata", async () => {
 		mocks.storageData.accounts = [
 			{
 				email: "mutating@example.com",
@@ -1200,7 +1291,7 @@ describe("AccountManager usage coordinator facade", () => {
 		];
 		mocks.fetchCodexUsage.mockResolvedValue({
 			primary: { usedPercent: 18 },
-			fetchedAt: 1,
+			fetchedAt: Date.now(),
 		});
 		const manager = new AccountManager();
 		const account = manager.getAccount("mutating@example.com");
@@ -1220,6 +1311,56 @@ describe("AccountManager usage coordinator facade", () => {
 
 		expect(mocks.fetchCodexUsage).toHaveBeenCalledOnce();
 		ensureValidToken.mockRestore();
+	});
+
+	it("records headless consumption without starting a usage request", async () => {
+		mocks.storageData.accounts = [
+			{
+				email: "headless@example.com",
+				accessToken: "access",
+				refreshToken: "refresh",
+				expiresAt: Date.now() + 3_600_000,
+			},
+		];
+		const manager = new AccountManager();
+		const account = manager.getAccount("headless@example.com");
+		if (!account) throw new Error("account missing");
+
+		manager.recordUsageConsumption(account);
+
+		expect(mocks.fetchCodexUsage).not.toHaveBeenCalled();
+		await Promise.resolve();
+		expect(mocks.fetchCodexUsage).not.toHaveBeenCalled();
+	});
+
+	it("returns normalized-email-keyed typed outcomes for all-account refresh", async () => {
+		mocks.storageData.accounts = [
+			{
+				email: " First@Example.com ",
+				accessToken: "access-1",
+				refreshToken: "refresh-1",
+				expiresAt: Date.now() + 3_600_000,
+			},
+			{
+				email: "second@example.com",
+				accessToken: "access-2",
+				refreshToken: "refresh-2",
+				expiresAt: Date.now() + 3_600_000,
+			},
+		];
+		mocks.fetchCodexUsage.mockResolvedValue({ fetchedAt: Date.now() });
+		const manager = new AccountManager();
+
+		const results = await manager.refreshUsageForAllAccounts();
+
+		expect(Object.keys(results).sort()).toEqual([
+			"first@example.com",
+			"second@example.com",
+		]);
+		expect(results["first@example.com"]).toMatchObject({
+			availability: "fresh",
+			source: "owned-fetch",
+		});
 	});
 
 	it("ignores late consumption from an account object no longer managed", () => {

@@ -1,10 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodexUsageSnapshot } from "./usage";
-import {
-	createUsageCoordinator,
-	USAGE_FRESHNESS_INTERVAL_MS,
-	type UsageAccount,
-} from "./usage-coordinator";
+import { createInMemoryUsageCoordination } from "./usage-coordination/index";
+import { createUsageCoordinator, type UsageAccount } from "./usage-coordinator";
 
 const account = (email: string, accountId?: string): UsageAccount => ({
 	email,
@@ -26,217 +23,270 @@ describe("UsageCoordinator", () => {
 		vi.useRealTimers();
 	});
 
-	it("shares snapshots by account id and normalized email fallback", async () => {
-		const coordinator = createUsageCoordinator();
-		const fetchUsage = vi.fn(async () => snapshot(Date.now()));
+	it("uses normalized email identity and never merges different emails by account id", async () => {
+		const shared = createInMemoryUsageCoordination();
+		const coordinator = createUsageCoordinator({ sharedCoordination: shared });
+		const fetchUsage = vi
+			.fn()
+			.mockResolvedValueOnce(snapshot(0, 10))
+			.mockResolvedValueOnce(snapshot(0, 20));
 
 		await coordinator.refresh(
-			account("First@Example.com", "acct-1"),
+			account(" First@Example.com ", "shared-account-id"),
 			fetchUsage,
 		);
-		expect(
-			coordinator.getCachedUsage(account("other@example.com", "acct-1")),
-		).toEqual(snapshot(0));
+		await coordinator.refresh(
+			account("second@example.com", "shared-account-id"),
+			fetchUsage,
+		);
 
-		await coordinator.refresh(account("  User@Example.com "), fetchUsage);
-		expect(coordinator.getCachedUsage("user@example.com")).toEqual(snapshot(0));
+		expect(
+			coordinator.getCachedUsage("first@example.com")?.primary?.usedPercent,
+		).toBe(10);
+		expect(
+			coordinator.getCachedUsage("second@example.com")?.primary?.usedPercent,
+		).toBe(20);
 		expect(fetchUsage).toHaveBeenCalledTimes(2);
 	});
 
-	it("uses thirty seconds from completed success or failure as eligibility", async () => {
-		const coordinator = createUsageCoordinator();
-		const fetchUsage =
-			vi.fn<(account: UsageAccount) => Promise<CodexUsageSnapshot>>();
-		fetchUsage.mockImplementation(async (value) =>
-			value.email === "failure@example.com"
-				? Promise.reject(new Error("down"))
-				: Promise.resolve(snapshot(Date.now())),
-		);
+	it("measures freshness only from accepted snapshot fetchedAt", async () => {
+		const shared = createInMemoryUsageCoordination();
+		const coordinator = createUsageCoordinator({ sharedCoordination: shared });
+		const fetchUsage = vi
+			.fn()
+			.mockResolvedValueOnce(snapshot(0))
+			.mockRejectedValueOnce(new Error("down"))
+			.mockResolvedValueOnce(snapshot(60_001, 30));
+		const value = account("person@example.com");
 
-		await coordinator.refresh(account("success@example.com"), fetchUsage);
-		await coordinator.refresh(account("success@example.com"), fetchUsage);
-		expect(fetchUsage).toHaveBeenCalledTimes(1);
-		vi.advanceTimersByTime(USAGE_FRESHNESS_INTERVAL_MS);
-		await coordinator.refresh(account("success@example.com"), fetchUsage);
-		expect(fetchUsage).toHaveBeenCalledTimes(2);
-		await expect(
-			coordinator.refresh(account("failure@example.com"), fetchUsage),
-		).rejects.toThrow("down");
-		await expect(
-			coordinator.refresh(account("failure@example.com"), fetchUsage),
-		).resolves.toBeUndefined();
+		await coordinator.refresh(value, fetchUsage);
+		vi.setSystemTime(30_001);
+		const failure = await coordinator.refresh(value, fetchUsage, {
+			force: true,
+		});
+		expect(failure.availability).toBe("stale");
+		expect(coordinator.isRefreshEligible(value)).toBe(true);
+
+		vi.setSystemTime(60_001);
+		await coordinator.refresh(value, fetchUsage, { force: true });
 		expect(fetchUsage).toHaveBeenCalledTimes(3);
 	});
 
-	it("measures success freshness from fetch completion, not snapshot timestamp", async () => {
-		const coordinator = createUsageCoordinator();
-		let release!: (value: CodexUsageSnapshot) => void;
-		const fetchUsage = vi
-			.fn<() => Promise<CodexUsageSnapshot>>()
-			.mockImplementationOnce(
-				() =>
-					new Promise<CodexUsageSnapshot>((resolve) => {
-						release = resolve;
-					}),
-			)
-			.mockResolvedValue(snapshot(40_000));
-
-		const pending = coordinator.refresh(
-			account("delayed@example.com"),
-			fetchUsage,
+	it("single-flights one account, runs different accounts concurrently, and lets force join", async () => {
+		const shared = createInMemoryUsageCoordination();
+		const coordinator = createUsageCoordinator({ sharedCoordination: shared });
+		const releases = new Map<string, (value: CodexUsageSnapshot) => void>();
+		const fetchUsage = vi.fn(
+			(value: UsageAccount) =>
+				new Promise<CodexUsageSnapshot>((resolve) => {
+					releases.set(value.email, resolve);
+				}),
 		);
-		expect(fetchUsage).toHaveBeenCalledOnce();
-		vi.advanceTimersByTime(10_000);
-		release(snapshot(0));
-		await pending;
 
-		vi.advanceTimersByTime(USAGE_FRESHNESS_INTERVAL_MS - 1);
-		await coordinator.refresh(account("delayed@example.com"), fetchUsage);
-		expect(fetchUsage).toHaveBeenCalledOnce();
+		const a = account("a@example.com");
+		const b = account("b@example.com");
+		const a1 = coordinator.refresh(a, fetchUsage);
+		const a2 = coordinator.refresh(a, fetchUsage, { force: true });
+		const b1 = coordinator.refresh(b, fetchUsage);
+		await vi.waitFor(() => expect(fetchUsage).toHaveBeenCalledTimes(2));
+		releases.get(a.email)?.(snapshot(0));
+		releases.get(b.email)?.(snapshot(0));
 
-		vi.advanceTimersByTime(1);
-		await coordinator.refresh(account("delayed@example.com"), fetchUsage);
+		const [owned, joined] = await Promise.all([a1, a2, b1]);
+		expect(owned.source).toBe("owned-fetch");
+		expect(joined.source).toBe("joined-work");
 		expect(fetchUsage).toHaveBeenCalledTimes(2);
 	});
 
-	it("runs different accounts concurrently and single-flights one account", async () => {
-		const coordinator = createUsageCoordinator();
-		let releaseA!: (value: CodexUsageSnapshot) => void;
-		let releaseB!: (value: CodexUsageSnapshot) => void;
-		const fetchUsage = vi.fn((value: UsageAccount) => {
-			return new Promise<CodexUsageSnapshot>((resolve) => {
-				if (value.email === "a@example.com") releaseA = resolve;
-				else releaseB = resolve;
-			});
-		});
-
-		const a1 = coordinator.refresh(account("a@example.com"), fetchUsage);
-		const a2 = coordinator.refresh(account("a@example.com"), fetchUsage);
-		const b = coordinator.refresh(account("b@example.com"), fetchUsage);
-		expect(fetchUsage).toHaveBeenCalledTimes(2);
-		releaseA(snapshot(0));
-		releaseB(snapshot(0));
-		await Promise.all([a1, a2, b]);
-		expect(fetchUsage).toHaveBeenCalledTimes(2);
-	});
-
-	it("coalesces dirty consumption events into one trailing refresh", async () => {
-		const coordinator = createUsageCoordinator();
-		const observer = coordinator.subscribeActiveObserver();
-		let release!: (value: CodexUsageSnapshot) => void;
-		const fetchUsage = vi.fn((_value: UsageAccount) => {
-			if (fetchUsage.mock.calls.length === 1) {
-				return new Promise<CodexUsageSnapshot>((resolve) => {
-					release = resolve;
-				});
-			}
-			return Promise.resolve(snapshot(Date.now(), 20));
-		});
-
-		coordinator.recordUsageConsumption(account("a@example.com"), fetchUsage);
-		coordinator.recordUsageConsumption(account("a@example.com"), fetchUsage);
-		expect(fetchUsage).toHaveBeenCalledTimes(1);
-		release(snapshot(0));
-		await vi.waitFor(() => expect(fetchUsage).toHaveBeenCalledTimes(1));
-		vi.advanceTimersByTime(USAGE_FRESHNESS_INTERVAL_MS);
-		await vi.runOnlyPendingTimersAsync();
-		expect(fetchUsage).toHaveBeenCalledTimes(2);
-		observer();
-	});
-
-	it("forces one immediate follow-up when force arrives during ordinary flight", async () => {
-		const coordinator = createUsageCoordinator();
-		let releaseFirst!: (value: CodexUsageSnapshot) => void;
-		const fetchUsage = vi.fn(() => {
-			if (fetchUsage.mock.calls.length === 1) {
-				return new Promise<CodexUsageSnapshot>((resolve) => {
-					releaseFirst = resolve;
-				});
-			}
-			return Promise.resolve(snapshot(Date.now(), 30));
-		});
-
-		const ordinary = coordinator.refresh(account("a@example.com"), fetchUsage);
-		const forced = coordinator.refresh(account("a@example.com"), fetchUsage, {
-			force: true,
-		});
-		expect(fetchUsage).toHaveBeenCalledTimes(1);
-		releaseFirst(snapshot(0));
-		await Promise.all([ordinary, forced]);
-		expect(fetchUsage).toHaveBeenCalledTimes(2);
-		expect(
-			coordinator.getCachedUsage("a@example.com")?.primary?.usedPercent,
-		).toBe(30);
-	});
-
-	it("cancels consumption-only trailing work when last observer leaves", async () => {
-		const coordinator = createUsageCoordinator();
-		const unsubscribe = coordinator.subscribeActiveObserver();
+	it("records headless consumption durably without starting network work", async () => {
+		const shared = createInMemoryUsageCoordination();
+		const coordinator = createUsageCoordinator({ sharedCoordination: shared });
 		const fetchUsage = vi.fn(async () => snapshot(Date.now()));
 
-		await coordinator.refresh(account("a@example.com"), fetchUsage);
-		coordinator.recordUsageConsumption(account("a@example.com"), fetchUsage);
+		coordinator.recordUsageConsumption(
+			account("headless@example.com"),
+			fetchUsage,
+		);
+		await vi.waitFor(async () => {
+			expect(
+				(await shared.read("headless@example.com")).pendingInvalidation,
+			).toBeDefined();
+		});
+		expect(fetchUsage).not.toHaveBeenCalled();
+	});
+
+	it("uses active observer demand to refresh once invalidated data loses freshness", async () => {
+		const shared = createInMemoryUsageCoordination();
+		const coordinator = createUsageCoordinator({ sharedCoordination: shared });
+		const fetchUsage = vi
+			.fn()
+			.mockResolvedValueOnce(snapshot(0, 10))
+			.mockResolvedValueOnce(snapshot(30_000, 20));
+		const value = account("observed@example.com");
+		await coordinator.refresh(value, fetchUsage);
+		const unsubscribe = coordinator.subscribeActiveObserver();
+
+		coordinator.recordUsageConsumption(value, fetchUsage);
+		await Promise.resolve();
+		expect(fetchUsage).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(30_000);
+		await vi.waitFor(() => expect(fetchUsage).toHaveBeenCalledTimes(2));
+		expect(coordinator.getCachedUsage(value)?.primary?.usedPercent).toBe(20);
 		unsubscribe();
-		vi.advanceTimersByTime(USAGE_FRESHNESS_INTERVAL_MS);
+	});
+
+	it("imports newer shared snapshots through validated subscription views", async () => {
+		const shared = createInMemoryUsageCoordination();
+		const first = createUsageCoordinator({ sharedCoordination: shared });
+		const second = createUsageCoordinator({ sharedCoordination: shared });
+		const value = account("shared@example.com");
+		const changed = vi.fn();
+		second.onUsageChange(changed);
+		const unsubscribe = second.subscribeActiveObserver();
+		await second.reconcile(value);
+
+		await first.refresh(value, async () => snapshot(0, 66));
+		await vi.waitFor(() =>
+			expect(second.getCachedUsage(value)?.primary?.usedPercent).toBe(66),
+		);
+		expect(changed).toHaveBeenCalled();
+		unsubscribe();
+	});
+
+	it("does not downgrade a newer in-memory snapshot after late shared publication", async () => {
+		const shared = createInMemoryUsageCoordination();
+		const current = createUsageCoordinator({ sharedCoordination: shared });
+		const lateOwner = createUsageCoordinator({ sharedCoordination: shared });
+		const value = account("late@example.com");
+		const unsubscribe = current.subscribeActiveObserver();
+		await current.refresh(value, async () => snapshot(100, 70));
+
+		await lateOwner.refresh(value, async () => snapshot(50, 20), {
+			force: true,
+		});
+
+		expect(current.getCachedUsage(value)).toEqual(snapshot(100, 70));
+		unsubscribe();
+	});
+
+	it("stops shared subscription and safety reconciliation after the last observer leaves", async () => {
+		const shared = createInMemoryUsageCoordination();
+		const read = vi.spyOn(shared, "read");
+		const originalSubscribe = shared.subscribe.bind(shared);
+		const subscriptionStopped = vi.fn();
+		vi.spyOn(shared, "subscribe").mockImplementation((email, handler) => {
+			const unsubscribe = originalSubscribe(email, handler);
+			return () => {
+				subscriptionStopped();
+				unsubscribe();
+			};
+		});
+		const coordinator = createUsageCoordinator({ sharedCoordination: shared });
+		await coordinator.reconcile(account("idle@example.com"));
+		const unsubscribe = coordinator.subscribeActiveObserver();
+		await Promise.resolve();
+		const readsWhileObserved = read.mock.calls.length;
+
+		unsubscribe();
+		await vi.advanceTimersByTimeAsync(60_000);
+
+		expect(subscriptionStopped).toHaveBeenCalledOnce();
+		expect(read).toHaveBeenCalledTimes(readsWhileObserved);
+	});
+
+	it("repairs missed watcher hints during likely-sleep safety reconciliation", async () => {
+		const shared = createInMemoryUsageCoordination();
+		vi.spyOn(shared, "subscribe").mockReturnValue(() => undefined);
+		const coordinator = createUsageCoordinator({ sharedCoordination: shared });
+		const fetchUsage = vi
+			.fn()
+			.mockResolvedValueOnce(snapshot(0, 10))
+			.mockResolvedValueOnce(snapshot(100_000, 20));
+		const value = account("sleep@example.com");
+		await coordinator.refresh(value, fetchUsage);
+		const unsubscribe = coordinator.subscribeActiveObserver();
+		await shared.invalidate(value.email);
+
+		vi.setSystemTime(shared.policy.sleepDetectionMs + 1);
+		await vi.advanceTimersByTimeAsync(shared.policy.freshnessIntervalMs);
 		await vi.runOnlyPendingTimersAsync();
 
-		expect(fetchUsage).toHaveBeenCalledTimes(1);
+		expect(fetchUsage).toHaveBeenCalledTimes(2);
+		expect(coordinator.getCachedUsage(value)?.primary?.usedPercent).toBe(20);
+		unsubscribe();
 	});
 
-	it("migrates a successful refresh when account identity becomes available", async () => {
-		const coordinator = createUsageCoordinator();
-		const value = account("mutable@example.com");
-		const fetchUsage = vi.fn(async (current: UsageAccount) => {
-			current.accountId = "acct-mutable";
-			return snapshot(Date.now(), 42);
+	it("keeps unpublished local snapshots distinct from shared freshness", async () => {
+		const shared = createInMemoryUsageCoordination();
+		vi.spyOn(shared, "refresh").mockResolvedValue({
+			availability: "locally-available",
+			source: "local-fallback",
+			snapshot: snapshot(0, 55),
 		});
+		const coordinator = createUsageCoordinator({ sharedCoordination: shared });
+		const value = account("local@example.com");
 
-		await coordinator.refresh(value, fetchUsage);
+		await coordinator.refresh(value, async () => snapshot(0));
 
-		expect(coordinator.getCachedUsage(value)?.primary?.usedPercent).toBe(42);
-		await coordinator.refresh(value, fetchUsage);
-		expect(fetchUsage).toHaveBeenCalledOnce();
-	});
-
-	it("does not repopulate an invalidated in-flight refresh after account identity mutation", async () => {
-		const coordinator = createUsageCoordinator();
-		const value = account("invalidated-mutable@example.com");
-		let release!: (result: CodexUsageSnapshot) => void;
-		const fetchUsage = vi.fn(async (current: UsageAccount) => {
-			current.accountId = "acct-invalidated";
-			return new Promise<CodexUsageSnapshot>((resolve) => {
-				release = resolve;
-			});
+		expect(coordinator.getCachedResult(value)).toMatchObject({
+			availability: "locally-available",
+			snapshot: { primary: { usedPercent: 55 } },
 		});
-
-		const refresh = coordinator.refresh(value, fetchUsage);
-		await vi.waitFor(() => expect(fetchUsage).toHaveBeenCalledOnce());
-		coordinator.invalidate(value);
-		release(snapshot(1, 99));
-		await refresh;
-
-		expect(coordinator.getCachedUsage(value)).toBeUndefined();
 	});
 
-	it("settles queued forced refreshes on invalidation without starting them", async () => {
-		const coordinator = createUsageCoordinator();
-		let release!: (result: CodexUsageSnapshot) => void;
-		const fetchUsage = vi.fn(() =>
-			fetchUsage.mock.calls.length === 1
-				? new Promise<CodexUsageSnapshot>((resolve) => {
-						release = resolve;
-					})
-				: Promise.resolve(snapshot(1)),
+	it("deduplicates persistent credential-free coordination warnings", async () => {
+		const shared = createInMemoryUsageCoordination();
+		vi.spyOn(shared, "read").mockResolvedValue({
+			status: "unavailable",
+			warning: {
+				code: "permission",
+				message: "Shared usage coordination storage is not accessible.",
+			},
+		});
+		const coordinator = createUsageCoordinator({ sharedCoordination: shared });
+		const warning = vi.fn();
+		coordinator.onWarning(warning);
+
+		await coordinator.reconcile(account("warning@example.com"));
+		await coordinator.reconcile(account("warning@example.com"));
+
+		expect(warning).toHaveBeenCalledOnce();
+	});
+
+	it("detaches an aborted waiter while owned work continues to publication", async () => {
+		const shared = createInMemoryUsageCoordination();
+		const coordinator = createUsageCoordinator({ sharedCoordination: shared });
+		let release!: (value: CodexUsageSnapshot) => void;
+		const fetchUsage = vi.fn(
+			() =>
+				new Promise<CodexUsageSnapshot>((resolve) => {
+					release = resolve;
+				}),
 		);
-		const value = account("queued-invalidation@example.com");
+		const controller = new AbortController();
+		const value = account("cancel@example.com");
 
-		const ordinary = coordinator.refresh(value, fetchUsage);
-		const forced = coordinator.refresh(value, fetchUsage, { force: true });
-		coordinator.invalidate(value);
+		const cancelled = coordinator.refresh(value, fetchUsage, {
+			signal: controller.signal,
+		});
+		await vi.waitFor(() => expect(fetchUsage).toHaveBeenCalledOnce());
+		controller.abort();
+		await expect(cancelled).resolves.toMatchObject({ source: "cancellation" });
+		release(snapshot(0, 70));
+		await vi.waitFor(() =>
+			expect(coordinator.getCachedUsage(value)?.primary?.usedPercent).toBe(70),
+		);
+	});
 
-		await expect(forced).resolves.toBeUndefined();
-		release(snapshot(0));
-		await ordinary;
-		expect(fetchUsage).toHaveBeenCalledOnce();
+	it("forgets only local state and reimports shared continuity after re-addition", async () => {
+		const shared = createInMemoryUsageCoordination();
+		const coordinator = createUsageCoordinator({ sharedCoordination: shared });
+		const value = account("readd@example.com");
+		await coordinator.refresh(value, async () => snapshot(0, 44));
+
+		coordinator.forget(value);
+		expect(coordinator.getCachedUsage(value)).toBeUndefined();
+		await coordinator.reconcile(account(" READD@example.com "));
+		expect(coordinator.getCachedUsage(value)?.primary?.usedPercent).toBe(44);
 	});
 });

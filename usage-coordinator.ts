@@ -1,6 +1,21 @@
+import { getAgentPath } from "./shared/agent-paths";
 import type { CodexUsageSnapshot } from "./usage";
+import {
+	createFilesystemUsageCoordination,
+	createInMemoryUsageCoordination,
+	isSnapshotFresh,
+	normalizeManagedAccountIdentity,
+	PRODUCTION_USAGE_COORDINATION_POLICY,
+	type SharedUsageCoordination,
+	type SharedUsageView,
+	type UsageCoordinationDiagnostic,
+	type UsageCoordinationWarning,
+	type UsageRefreshResult,
+	waitForDetached,
+} from "./usage-coordination/index";
 
-export const USAGE_FRESHNESS_INTERVAL_MS = 30 * 1000;
+export const USAGE_FRESHNESS_INTERVAL_MS =
+	PRODUCTION_USAGE_COORDINATION_POLICY.freshnessIntervalMs;
 
 export interface UsageAccount {
 	email: string;
@@ -22,63 +37,70 @@ type UsageChangeHandler = (
 	usage: CodexUsageSnapshot,
 ) => void;
 
-type RefreshResult = CodexUsageSnapshot | undefined;
+type WarningHandler = (warning: UsageCoordinationWarning) => void;
 
 type InFlightRefresh = {
-	promise: Promise<RefreshResult>;
-	force: boolean;
-};
-
-type PendingForce = {
-	start: () => Promise<RefreshResult>;
-	waiters: Array<{
-		resolve: (value: RefreshResult | PromiseLike<RefreshResult>) => void;
-		reject: (reason?: unknown) => void;
-	}>;
+	promise: Promise<UsageRefreshResult>;
+	controller: AbortController;
 };
 
 type UsageEntry = {
-	key: string;
-	account?: UsageAccount;
-	accountReferences: Set<UsageAccount>;
+	identity: string;
+	account: UsageAccount;
 	snapshot?: CodexUsageSnapshot;
-	lastAttemptAt?: number;
+	locallyAvailable: boolean;
+	fetcher?: UsageFetcher;
 	inFlight?: InFlightRefresh;
+	sharedUnsubscribe?: () => void;
 	consumptionDirty: boolean;
 	consumptionTimer?: ReturnType<typeof setTimeout>;
-	pendingForce?: PendingForce;
+	invalidationRunning?: Promise<void>;
+	invalidationPending: boolean;
 };
 
+export interface UsageCoordinatorOptions {
+	sharedCoordination?: SharedUsageCoordination;
+	now?: () => number;
+}
+
 export function normalizeUsageEmail(email: string): string {
-	return email.trim().toLowerCase();
+	return normalizeManagedAccountIdentity(email);
 }
 
 export function getUsageKey(account: UsageAccount | string): string {
-	if (typeof account === "string") {
-		return `email:${normalizeUsageEmail(account)}`;
-	}
-	const accountId = account.accountId?.trim();
-	return accountId
-		? `account:${accountId}`
-		: `email:${normalizeUsageEmail(account.email)}`;
-}
-
-function isEligible(lastAttemptAt: number | undefined, now: number): boolean {
-	return (
-		lastAttemptAt === undefined ||
-		now - lastAttemptAt >= USAGE_FRESHNESS_INTERVAL_MS
-	);
+	const email = typeof account === "string" ? account : account.email;
+	return `email:${normalizeUsageEmail(email)}`;
 }
 
 export class UsageCoordinator {
 	private readonly entries = new Map<string, UsageEntry>();
 	private readonly changeHandlers = new Set<UsageChangeHandler>();
+	private readonly warningHandlers = new Set<WarningHandler>();
+	private readonly warnedCoordinationFailures = new Set<string>();
+	private readonly sharedCoordination: SharedUsageCoordination;
+	private readonly now: () => number;
 	private activeObserverCount = 0;
+	private reconciliationTimer?: ReturnType<typeof setTimeout>;
+	private lastReconciliationAt?: number;
+
+	constructor(options: UsageCoordinatorOptions = {}) {
+		this.sharedCoordination =
+			options.sharedCoordination ?? createInMemoryUsageCoordination();
+		this.now = options.now ?? Date.now;
+	}
 
 	dispose(): void {
-		this.cancelConsumptionWork();
+		this.stopObserverWork();
+		for (const entry of this.entries.values()) {
+			entry.inFlight?.controller.abort();
+			this.clearConsumptionWork(entry);
+		}
+		this.entries.clear();
 		this.changeHandlers.clear();
+		this.warningHandlers.clear();
+		this.warnedCoordinationFailures.clear();
 		this.activeObserverCount = 0;
+		this.sharedCoordination.dispose();
 	}
 
 	getCachedUsage(
@@ -87,30 +109,64 @@ export class UsageCoordinator {
 		return this.entries.get(getUsageKey(account))?.snapshot;
 	}
 
-	isRefreshEligible(account: UsageAccount | string, now = Date.now()): boolean {
-		return isEligible(
-			this.entries.get(getUsageKey(account))?.lastAttemptAt,
+	getCachedResult(account: UsageAccount | string): UsageRefreshResult {
+		const entry = this.entries.get(getUsageKey(account));
+		const snapshot = entry?.snapshot;
+		return {
+			availability: snapshot
+				? entry?.locallyAvailable
+					? "locally-available"
+					: isSnapshotFresh(
+								snapshot,
+								this.now(),
+								this.sharedCoordination.policy,
+							)
+						? "fresh"
+						: "stale"
+				: "unavailable",
+			source: "failure",
+			...(snapshot ? { snapshot } : {}),
+		};
+	}
+
+	isRefreshEligible(account: UsageAccount | string, now = this.now()): boolean {
+		return !isSnapshotFresh(
+			this.getCachedUsage(account),
 			now,
+			this.sharedCoordination.policy,
 		);
 	}
 
 	onUsageChange(handler: UsageChangeHandler): () => void {
 		this.changeHandlers.add(handler);
-		return () => {
-			this.changeHandlers.delete(handler);
+		return () => this.changeHandlers.delete(handler);
+	}
+
+	onWarning(handler: WarningHandler): () => void {
+		this.warningHandlers.add(handler);
+		return () => this.warningHandlers.delete(handler);
+	}
+
+	resetWarnings(): void {
+		this.warnedCoordinationFailures.clear();
+	}
+
+	getDiagnostics(): readonly UsageCoordinationDiagnostic[] {
+		const shared = this.sharedCoordination as SharedUsageCoordination & {
+			getDiagnostics?: () => readonly UsageCoordinationDiagnostic[];
 		};
+		return shared.getDiagnostics?.() ?? [];
 	}
 
 	subscribeActiveObserver(): () => void {
 		this.activeObserverCount += 1;
+		if (this.activeObserverCount === 1) this.startObserverWork();
 		let subscribed = true;
 		return () => {
 			if (!subscribed) return;
 			subscribed = false;
 			this.activeObserverCount = Math.max(0, this.activeObserverCount - 1);
-			if (this.activeObserverCount === 0) {
-				this.cancelConsumptionWork();
-			}
+			if (this.activeObserverCount === 0) this.stopObserverWork();
 		};
 	}
 
@@ -118,262 +174,281 @@ export class UsageCoordinator {
 		account: UsageAccount,
 		fetcher: UsageFetcher,
 		request: UsageRefreshRequest = {},
-	): Promise<RefreshResult> {
-		const key = getUsageKey(account);
-		const entry = this.getOrCreateEntry(key, account);
-		const force = request.force === true;
-
+	): Promise<UsageRefreshResult> {
+		const entry = this.getOrCreateEntry(account);
+		entry.fetcher = fetcher;
 		if (entry.inFlight) {
-			if (force && !entry.inFlight.force) {
-				return this.queueForcedFollowup(entry, account, fetcher, request);
-			}
-			return entry.inFlight.promise;
+			return this.waitForWork(entry.inFlight.promise, request.signal, false);
 		}
 
-		if (!force && !isEligible(entry.lastAttemptAt, Date.now())) {
-			return Promise.resolve(entry.snapshot);
-		}
-
-		if (force) {
-			this.clearConsumptionWork(entry);
-		}
-		return this.startRefresh(entry, account, fetcher, {
-			...request,
-			force,
+		const controller = new AbortController();
+		const promise = this.runRefresh(
+			entry,
+			account,
+			fetcher,
+			request.force === true,
+			controller,
+		);
+		entry.inFlight = { promise, controller };
+		void promise.finally(() => {
+			if (entry.inFlight?.promise !== promise) return;
+			entry.inFlight = undefined;
+			void this.reconcileEntry(entry).finally(() => {
+				if (this.entries.get(getUsageKey(entry.account)) !== entry) return;
+				this.scheduleConsumptionRefresh(entry);
+			});
 		});
+		return this.waitForWork(promise, request.signal, true);
 	}
 
-	invalidate(account: UsageAccount): void {
+	async reconcile(account: UsageAccount): Promise<SharedUsageView> {
+		const entry = this.getOrCreateEntry(account);
+		return this.reconcileEntry(entry);
+	}
+
+	forget(account: UsageAccount | string): void {
 		const key = getUsageKey(account);
-		const entry =
-			this.entries.get(key) ??
-			[...this.entries.values()].find((candidate) =>
-				candidate.accountReferences.has(account),
-			);
+		const entry = this.entries.get(key);
 		if (!entry) return;
-		if (this.entries.get(entry.key) === entry) {
-			this.entries.delete(entry.key);
-		}
+		this.entries.delete(key);
+		entry.inFlight?.controller.abort();
+		entry.sharedUnsubscribe?.();
+		entry.sharedUnsubscribe = undefined;
 		this.clearConsumptionWork(entry);
-		const pendingForce = entry.pendingForce;
-		entry.pendingForce = undefined;
-		for (const waiter of pendingForce?.waiters ?? []) {
-			waiter.resolve(undefined);
-		}
+		entry.invalidationPending = false;
 	}
 
 	recordUsageConsumption(account: UsageAccount, fetcher: UsageFetcher): void {
-		if (this.activeObserverCount === 0) return;
-
-		const key = getUsageKey(account);
-		const entry = this.getOrCreateEntry(key, account);
+		const entry = this.getOrCreateEntry(account);
+		entry.fetcher = fetcher;
 		entry.consumptionDirty = true;
-		if (entry.inFlight) return;
-
-		this.startEligibleConsumptionRefresh(entry, account, fetcher);
+		entry.invalidationPending = true;
+		if (!entry.invalidationRunning) this.startInvalidationLoop(entry);
 	}
 
-	private getOrCreateEntry(key: string, account: UsageAccount): UsageEntry {
+	private getOrCreateEntry(account: UsageAccount): UsageEntry {
+		const key = getUsageKey(account);
 		const existing = this.entries.get(key);
 		if (existing) {
 			existing.account = account;
-			existing.accountReferences.add(account);
 			return existing;
 		}
 		const entry: UsageEntry = {
-			key,
+			identity: normalizeUsageEmail(account.email),
 			account,
-			accountReferences: new Set([account]),
+			locallyAvailable: false,
 			consumptionDirty: false,
+			invalidationPending: false,
 		};
 		this.entries.set(key, entry);
+		if (this.activeObserverCount > 0) {
+			this.subscribeEntry(entry);
+			void this.reconcileEntry(entry);
+		}
 		return entry;
 	}
 
-	private startEligibleConsumptionRefresh(
+	private async runRefresh(
 		entry: UsageEntry,
 		account: UsageAccount,
 		fetcher: UsageFetcher,
-	): void {
-		if (this.activeObserverCount === 0 || entry.inFlight) return;
-		const now = Date.now();
-		if (isEligible(entry.lastAttemptAt, now)) {
-			this.clearConsumptionTimer(entry);
-			entry.consumptionDirty = false;
-			void this.startRefresh(entry, account, fetcher, { force: false }).catch(
-				() => undefined,
-			);
-			return;
+		force: boolean,
+		controller: AbortController,
+	): Promise<UsageRefreshResult> {
+		const result = await this.sharedCoordination.refresh(
+			entry.identity,
+			({ signal }) => {
+				const workSignal = signal
+					? AbortSignal.any([signal, controller.signal])
+					: controller.signal;
+				return fetcher(account, { signal: workSignal });
+			},
+			{ force },
+		);
+		if (this.entries.get(getUsageKey(entry.account)) === entry) {
+			this.applyRefreshResult(entry, result);
 		}
-		this.scheduleConsumptionRefresh(entry, account, fetcher);
+		return result;
 	}
 
-	private scheduleConsumptionRefresh(
+	private applyRefreshResult(
 		entry: UsageEntry,
-		account: UsageAccount,
-		fetcher: UsageFetcher,
+		result: UsageRefreshResult,
 	): void {
+		if (result.snapshot) {
+			this.acceptSnapshot(
+				entry,
+				result.snapshot,
+				result.availability === "locally-available",
+			);
+		}
+		if (result.warning) this.notifyWarning(result.warning);
+	}
+
+	private async reconcileEntry(entry: UsageEntry): Promise<SharedUsageView> {
+		const view = await this.sharedCoordination.read(entry.identity);
+		if (this.entries.get(getUsageKey(entry.account)) !== entry) return view;
+		this.applySharedView(entry, view);
+		return view;
+	}
+
+	private applySharedView(entry: UsageEntry, view: SharedUsageView): void {
+		if (view.snapshot) this.acceptSnapshot(entry, view.snapshot, false);
+		entry.consumptionDirty = Boolean(view.pendingInvalidation);
+		if (view.warning) this.notifyWarning(view.warning);
+		this.scheduleConsumptionRefresh(entry);
+	}
+
+	private acceptSnapshot(
+		entry: UsageEntry,
+		snapshot: CodexUsageSnapshot,
+		locallyAvailable: boolean,
+	): void {
+		if (entry.snapshot && entry.snapshot.fetchedAt > snapshot.fetchedAt) {
+			return;
+		}
+		if (
+			entry.snapshot &&
+			entry.snapshot.fetchedAt === snapshot.fetchedAt &&
+			JSON.stringify(entry.snapshot) === JSON.stringify(snapshot)
+		) {
+			entry.locallyAvailable = locallyAvailable;
+			return;
+		}
+		entry.snapshot = snapshot;
+		entry.locallyAvailable = locallyAvailable;
+		for (const handler of this.changeHandlers) {
+			handler(entry.account, snapshot);
+		}
+	}
+
+	private startInvalidationLoop(entry: UsageEntry): void {
+		let running!: Promise<void>;
+		running = (async () => {
+			while (entry.invalidationPending) {
+				entry.invalidationPending = false;
+				const view = await this.sharedCoordination.invalidate(entry.identity);
+				if (this.entries.get(getUsageKey(entry.account)) !== entry) return;
+				this.applySharedView(entry, view);
+			}
+		})()
+			.catch((error) => {
+				this.notifyWarning({
+					code: "coordination-unavailable",
+					message: `Shared usage invalidation failed: ${String(error)}`,
+				});
+			})
+			.finally(() => {
+				if (entry.invalidationRunning === running) {
+					entry.invalidationRunning = undefined;
+				}
+				if (entry.invalidationPending) this.startInvalidationLoop(entry);
+			});
+		entry.invalidationRunning = running;
+	}
+
+	private scheduleConsumptionRefresh(entry: UsageEntry): void {
 		if (
 			this.activeObserverCount === 0 ||
-			entry.consumptionTimer ||
-			!entry.consumptionDirty
+			!entry.consumptionDirty ||
+			entry.inFlight ||
+			!entry.fetcher ||
+			entry.consumptionTimer
 		) {
 			return;
 		}
-
-		const delay = Math.max(
-			0,
-			(entry.lastAttemptAt ?? Date.now()) +
-				USAGE_FRESHNESS_INTERVAL_MS -
-				Date.now(),
-		);
+		const fetchedAt = entry.snapshot?.fetchedAt;
+		const delay =
+			fetchedAt === undefined
+				? 0
+				: Math.max(
+						0,
+						fetchedAt +
+							this.sharedCoordination.policy.freshnessIntervalMs -
+							this.now(),
+					);
 		entry.consumptionTimer = setTimeout(() => {
 			entry.consumptionTimer = undefined;
-			if (this.activeObserverCount === 0 || !entry.consumptionDirty) return;
-			if (entry.inFlight) return;
-			this.startEligibleConsumptionRefresh(entry, account, fetcher);
+			if (
+				this.activeObserverCount === 0 ||
+				!entry.consumptionDirty ||
+				entry.inFlight ||
+				!entry.fetcher
+			) {
+				return;
+			}
+			void this.refresh(entry.account, entry.fetcher).then(() => undefined);
 		}, delay);
 		entry.consumptionTimer.unref?.();
 	}
 
-	private startRefresh(
-		entry: UsageEntry,
-		account: UsageAccount,
-		fetcher: UsageFetcher,
-		request: UsageRefreshRequest & { force: boolean },
-	): Promise<RefreshResult> {
-		let promise!: Promise<RefreshResult>;
-		promise = (async () => {
-			try {
-				const usage = await fetcher(account, { signal: request.signal });
-				const completedAt = Date.now();
-				const fetchedAt =
-					typeof usage.fetchedAt === "number" &&
-					Number.isFinite(usage.fetchedAt)
-						? usage.fetchedAt
-						: completedAt;
-				const normalizedUsage =
-					usage.fetchedAt === fetchedAt ? usage : { ...usage, fetchedAt };
-				const currentEntry = this.migrateEntryForAccountIdentity(
-					entry,
-					account,
-				);
-				if (currentEntry) {
-					currentEntry.snapshot = normalizedUsage;
-					currentEntry.lastAttemptAt = completedAt;
-					this.notifyUsageChange(
-						currentEntry.account ?? account,
-						normalizedUsage,
-					);
-				}
-				return normalizedUsage;
-			} catch (error) {
-				entry.lastAttemptAt = Date.now();
-				throw error;
-			} finally {
-				if (entry.inFlight?.promise === promise) {
-					entry.inFlight = undefined;
-					this.finishRefresh(entry, account, fetcher);
-				}
-			}
-		})();
-
-		entry.inFlight = {
-			promise,
-			force: request.force,
+	private waitForWork(
+		promise: Promise<UsageRefreshResult>,
+		signal: AbortSignal | undefined,
+		owner: boolean,
+	): Promise<UsageRefreshResult> {
+		const normalize = (result: UsageRefreshResult): UsageRefreshResult => {
+			if (owner) return result;
+			const { error: _error, ...shared } = result;
+			return { ...shared, source: "joined-work" };
 		};
-		return promise;
+		return waitForDetached(promise.then(normalize), signal, () => ({
+			availability: "unavailable",
+			source: "cancellation",
+		}));
 	}
 
-	private migrateEntryForAccountIdentity(
-		entry: UsageEntry,
-		account: UsageAccount,
-	): UsageEntry | undefined {
-		if (this.entries.get(entry.key) !== entry) return undefined;
-
-		const nextKey = getUsageKey(account);
-		if (nextKey === entry.key) return entry;
-
-		const existing = this.entries.get(nextKey);
-		if (existing && existing !== entry) {
-			if (
-				entry.lastAttemptAt !== undefined &&
-				entry.lastAttemptAt > (existing.lastAttemptAt ?? -Infinity)
-			) {
-				existing.lastAttemptAt = entry.lastAttemptAt;
-			}
-			if (!existing.snapshot && entry.snapshot) {
-				existing.snapshot = entry.snapshot;
-			}
-			for (const accountReference of entry.accountReferences) {
-				existing.accountReferences.add(accountReference);
-			}
-			existing.consumptionDirty ||= entry.consumptionDirty;
-			this.entries.delete(entry.key);
-			return existing;
+	private startObserverWork(): void {
+		for (const entry of this.entries.values()) {
+			this.subscribeEntry(entry);
+			void this.reconcileEntry(entry);
 		}
-
-		this.entries.delete(entry.key);
-		entry.key = nextKey;
-		this.entries.set(nextKey, entry);
-		return entry;
+		this.lastReconciliationAt = this.now();
+		this.scheduleSafetyReconciliation();
 	}
 
-	private finishRefresh(
-		entry: UsageEntry,
-		account: UsageAccount,
-		fetcher: UsageFetcher,
-	): void {
-		const isCurrent = this.entries.get(entry.key) === entry;
-		const pendingForce = entry.pendingForce;
-		if (pendingForce) {
-			entry.pendingForce = undefined;
-			entry.consumptionDirty = false;
-			const followup = pendingForce.start();
-			for (const waiter of pendingForce.waiters) {
-				followup.then(waiter.resolve, waiter.reject);
+	private stopObserverWork(): void {
+		if (this.reconciliationTimer) {
+			clearTimeout(this.reconciliationTimer);
+			this.reconciliationTimer = undefined;
+		}
+		for (const entry of this.entries.values()) {
+			entry.sharedUnsubscribe?.();
+			entry.sharedUnsubscribe = undefined;
+			this.clearConsumptionTimer(entry);
+		}
+		this.lastReconciliationAt = undefined;
+	}
+
+	private subscribeEntry(entry: UsageEntry): void {
+		if (entry.sharedUnsubscribe) return;
+		entry.sharedUnsubscribe = this.sharedCoordination.subscribe(
+			entry.identity,
+			(view) => {
+				if (this.entries.get(getUsageKey(entry.account)) !== entry) return;
+				this.applySharedView(entry, view);
+			},
+		);
+	}
+
+	private scheduleSafetyReconciliation(): void {
+		if (this.activeObserverCount === 0 || this.reconciliationTimer) return;
+		this.reconciliationTimer = setTimeout(() => {
+			this.reconciliationTimer = undefined;
+			if (this.activeObserverCount === 0) return;
+			const now = this.now();
+			const previous = this.lastReconciliationAt;
+			this.lastReconciliationAt = now;
+			const likelySleep =
+				previous !== undefined &&
+				now - previous >= this.sharedCoordination.policy.sleepDetectionMs;
+			for (const entry of this.entries.values()) {
+				void this.reconcileEntry(entry);
+				if (likelySleep) this.clearConsumptionTimer(entry);
 			}
-			return;
-		}
-
-		if (!isCurrent) return;
-
-		if (this.activeObserverCount === 0) {
-			this.clearConsumptionWork(entry);
-			return;
-		}
-		if (!entry.consumptionDirty) return;
-		this.scheduleConsumptionRefresh(entry, account, fetcher);
-	}
-
-	private queueForcedFollowup(
-		entry: UsageEntry,
-		account: UsageAccount,
-		fetcher: UsageFetcher,
-		request: UsageRefreshRequest,
-	): Promise<RefreshResult> {
-		if (!entry.pendingForce) {
-			entry.pendingForce = {
-				start: () =>
-					this.startRefresh(entry, account, fetcher, {
-						...request,
-						force: true,
-					}),
-				waiters: [],
-			};
-		}
-		return new Promise<RefreshResult>((resolve, reject) => {
-			entry.pendingForce?.waiters.push({ resolve, reject });
-		});
-	}
-
-	private notifyUsageChange(
-		account: UsageAccount,
-		usage: CodexUsageSnapshot,
-	): void {
-		for (const handler of this.changeHandlers) {
-			handler(account, usage);
-		}
+			this.scheduleSafetyReconciliation();
+		}, this.sharedCoordination.policy.freshnessIntervalMs);
+		this.reconciliationTimer.unref?.();
 	}
 
 	private clearConsumptionTimer(entry: UsageEntry): void {
@@ -387,10 +462,12 @@ export class UsageCoordinator {
 		entry.consumptionDirty = false;
 	}
 
-	private cancelConsumptionWork(): void {
-		for (const entry of this.entries.values()) {
-			this.clearConsumptionWork(entry);
-		}
+	private notifyWarning(warning: UsageCoordinationWarning): void {
+		if (this.warningHandlers.size === 0) return;
+		const key = `${warning.code}:${warning.message}`;
+		if (this.warnedCoordinationFailures.has(key)) return;
+		this.warnedCoordinationFailures.add(key);
+		for (const handler of this.warningHandlers) handler(warning);
 	}
 }
 
@@ -409,12 +486,18 @@ export function getUsageCoordinator(): UsageCoordinator {
 	) {
 		return existing as UsageCoordinator;
 	}
-	const coordinator = new UsageCoordinator();
+	const coordinator = new UsageCoordinator({
+		sharedCoordination: createFilesystemUsageCoordination({
+			root: getAgentPath("state", "multicodex", "usage-coordination"),
+		}),
+	});
 	globalState[PROCESS_COORDINATOR_KEY] = coordinator;
 	return coordinator;
 }
 
-export function resetUsageCoordinatorForTests(): void {
+export function resetUsageCoordinatorForTests(
+	sharedCoordination: SharedUsageCoordination = createInMemoryUsageCoordination(),
+): void {
 	const globalState = getProcessGlobalState();
 	const existing = globalState[PROCESS_COORDINATOR_KEY];
 	if (
@@ -423,9 +506,13 @@ export function resetUsageCoordinatorForTests(): void {
 	) {
 		(existing as UsageCoordinator).dispose();
 	}
-	globalState[PROCESS_COORDINATOR_KEY] = new UsageCoordinator();
+	globalState[PROCESS_COORDINATOR_KEY] = new UsageCoordinator({
+		sharedCoordination,
+	});
 }
 
-export function createUsageCoordinator(): UsageCoordinator {
-	return new UsageCoordinator();
+export function createUsageCoordinator(
+	options: UsageCoordinatorOptions = {},
+): UsageCoordinator {
+	return new UsageCoordinator(options);
 }

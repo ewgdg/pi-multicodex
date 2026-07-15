@@ -5,6 +5,8 @@ import {
 	formatActiveAccountStatus,
 	isManagedModel,
 } from "./status";
+import type { CodexUsageSnapshot } from "./usage";
+import type { UsageRefreshResult } from "./usage-coordination/index";
 
 const defaultPreferences: FooterPreferences = {
 	usageMode: "left",
@@ -13,6 +15,19 @@ const defaultPreferences: FooterPreferences = {
 	showReset: true,
 	order: "account-first",
 };
+
+function freshUsageResult(snapshot: CodexUsageSnapshot): UsageRefreshResult {
+	return { availability: "fresh", source: "owned-fetch", snapshot };
+}
+
+function getRequiredUsage(
+	usages: Map<string, CodexUsageSnapshot>,
+	email: string,
+): CodexUsageSnapshot {
+	const usage = usages.get(email);
+	if (!usage) throw new Error(`missing usage for ${email}`);
+	return usage;
+}
 
 function createContext(overrides?: {
 	provider?: string;
@@ -214,11 +229,13 @@ describe("createUsageStatusController", () => {
 			subscribeUsageObserver: () => () => undefined,
 			getActiveAccount: () => ({ email: "a@example.com" }),
 			getCachedUsage: vi.fn(),
-			refreshUsageForAccount: vi.fn().mockResolvedValue({
-				primary: { usedPercent: 10, resetAt: 1 },
-				secondary: { usedPercent: 20, resetAt: 2 },
-				fetchedAt: 0,
-			}),
+			refreshUsageForAccount: vi.fn().mockResolvedValue(
+				freshUsageResult({
+					primary: { usedPercent: 10, resetAt: 1 },
+					secondary: { usedPercent: 20, resetAt: 2 },
+					fetchedAt: 0,
+				}),
+			),
 		} as never);
 
 		await controller.refreshFor(createContext({ setStatus }));
@@ -278,7 +295,10 @@ describe("createUsageStatusController", () => {
 				secondary: { usedPercent: 40, resetAt: 2 },
 				fetchedAt: 0,
 			}),
-			refreshUsageForAccount: vi.fn().mockResolvedValue(undefined),
+			refreshUsageForAccount: vi.fn().mockResolvedValue({
+				availability: "unavailable",
+				source: "failure",
+			}),
 		} as never);
 
 		await controller.refreshFor(createContext({ setStatus }));
@@ -296,11 +316,13 @@ describe("createUsageStatusController", () => {
 	it("debounces model-select refreshes while rendering cached usage immediately", async () => {
 		vi.useFakeTimers();
 		const setStatus = vi.fn();
-		const refreshUsageForAccount = vi.fn().mockResolvedValue({
-			primary: { usedPercent: 10, resetAt: 1 },
-			secondary: { usedPercent: 20, resetAt: 2 },
-			fetchedAt: 0,
-		});
+		const refreshUsageForAccount = vi.fn().mockResolvedValue(
+			freshUsageResult({
+				primary: { usedPercent: 10, resetAt: 1 },
+				secondary: { usedPercent: 20, resetAt: 2 },
+				fetchedAt: 0,
+			}),
+		);
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
 			subscribeUsageObserver: () => () => undefined,
@@ -354,7 +376,9 @@ describe("createUsageStatusController", () => {
 	it("does not poll status while idle", async () => {
 		vi.useFakeTimers();
 		const setStatus = vi.fn();
-		const refreshUsageForAccount = vi.fn().mockResolvedValue({ fetchedAt: 0 });
+		const refreshUsageForAccount = vi
+			.fn()
+			.mockResolvedValue(freshUsageResult({ fetchedAt: 0 }));
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
 			subscribeUsageObserver: () => () => undefined,
@@ -405,7 +429,9 @@ describe("createUsageStatusController", () => {
 			subscribeUsageObserver: () => () => undefined,
 			getActiveAccount: () => ({ email: "a@example.com" }),
 			getCachedUsage: vi.fn(),
-			refreshUsageForAccount: vi.fn().mockResolvedValue({ fetchedAt: 0 }),
+			refreshUsageForAccount: vi
+				.fn()
+				.mockResolvedValue(freshUsageResult({ fetchedAt: 0 })),
 		} as never);
 
 		await controller.refreshFor(ctx as never);
@@ -418,20 +444,10 @@ describe("createUsageStatusController", () => {
 
 	it("does not touch a stale context after session shutdown during refresh", async () => {
 		const setStatus = vi.fn();
-		let resolveUsage:
-			| ((value: {
-					primary: { usedPercent: number; resetAt: number };
-					secondary: { usedPercent: number; resetAt: number };
-					fetchedAt: number;
-			  }) => void)
-			| undefined;
+		let resolveUsage: ((value: UsageRefreshResult) => void) | undefined;
 		const refreshUsageForAccount = vi.fn(
 			() =>
-				new Promise<{
-					primary: { usedPercent: number; resetAt: number };
-					secondary: { usedPercent: number; resetAt: number };
-					fetchedAt: number;
-				}>((resolve) => {
+				new Promise<UsageRefreshResult>((resolve) => {
 					resolveUsage = resolve;
 				}),
 		);
@@ -450,11 +466,13 @@ describe("createUsageStatusController", () => {
 		);
 		controller.stopSession(ctx);
 		setStatus.mockClear();
-		resolveUsage?.({
-			primary: { usedPercent: 10, resetAt: 1 },
-			secondary: { usedPercent: 20, resetAt: 2 },
-			fetchedAt: 0,
-		});
+		resolveUsage?.(
+			freshUsageResult({
+				primary: { usedPercent: 10, resetAt: 1 },
+				secondary: { usedPercent: 20, resetAt: 2 },
+				fetchedAt: 0,
+			}),
+		);
 		await refresh;
 
 		expect(setStatus).not.toHaveBeenCalled();
@@ -492,7 +510,9 @@ describe("createUsageStatusController", () => {
 			getCachedUsage: (email: string) => usages.get(email),
 			refreshUsageForAccount: vi
 				.fn()
-				.mockImplementation(async () => usages.get(activeEmail)),
+				.mockImplementation(async () =>
+					freshUsageResult(getRequiredUsage(usages, activeEmail)),
+				),
 		} as never);
 		const ctx = createContext({ setStatus });
 
@@ -513,19 +533,12 @@ describe("createUsageStatusController", () => {
 	it("does not restore footer when model switches away during usage refresh", async () => {
 		const setStatus = vi.fn();
 		let provider = "openai-codex";
-		let resolveUsage:
-			| ((value: {
-					primary: { usedPercent: number };
-					fetchedAt: number;
-			  }) => void)
-			| undefined;
+		let resolveUsage: ((value: UsageRefreshResult) => void) | undefined;
 		const refreshUsageForAccount = vi.fn(
 			() =>
-				new Promise<{ primary: { usedPercent: number }; fetchedAt: number }>(
-					(resolve) => {
-						resolveUsage = resolve;
-					},
-				),
+				new Promise<UsageRefreshResult>((resolve) => {
+					resolveUsage = resolve;
+				}),
 		);
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
@@ -557,7 +570,9 @@ describe("createUsageStatusController", () => {
 		provider = "anthropic";
 		controller.setUsageObserverActive(ctx, false);
 		setStatus.mockClear();
-		resolveUsage?.({ primary: { usedPercent: 10 }, fetchedAt: 1 });
+		resolveUsage?.(
+			freshUsageResult({ primary: { usedPercent: 10 }, fetchedAt: 1 }),
+		);
 		await refresh;
 
 		expect(setStatus).not.toHaveBeenCalledWith(
@@ -580,7 +595,9 @@ describe("createUsageStatusController", () => {
 			subscribeUsageObserver: () => unsubscribe,
 			getActiveAccount: () => ({ email: "a@example.com" }),
 			getCachedUsage: vi.fn(),
-			refreshUsageForAccount: vi.fn().mockResolvedValue({ fetchedAt: 1 }),
+			refreshUsageForAccount: vi
+				.fn()
+				.mockResolvedValue(freshUsageResult({ fetchedAt: 1 })),
 		} as never);
 		const ctx = createContext({ setStatus });
 
@@ -601,7 +618,9 @@ describe("createUsageStatusController", () => {
 			subscribeUsageObserver: () => () => undefined,
 			getActiveAccount: () => ({ email: "a@example.com" }),
 			getCachedUsage: vi.fn(),
-			refreshUsageForAccount: vi.fn().mockResolvedValue({ fetchedAt: 1 }),
+			refreshUsageForAccount: vi
+				.fn()
+				.mockResolvedValue(freshUsageResult({ fetchedAt: 1 })),
 		} as never);
 		const ctx = createContext({ setStatus });
 
@@ -621,7 +640,7 @@ describe("active usage observer lifecycle", () => {
 		const subscribeUsageObserver = vi.fn(() => unsubscribe);
 		const refreshUsageForAccount = vi
 			.fn()
-			.mockResolvedValue({ fetchedAt: Date.now() });
+			.mockResolvedValue(freshUsageResult({ fetchedAt: Date.now() }));
 		const controller = createUsageStatusController({
 			onStateChange: () => () => undefined,
 			getActiveAccount: () => ({ email: "a@example.com" }),
@@ -687,7 +706,9 @@ describe("active usage observer lifecycle", () => {
 			getCachedUsage: (email: string) => usages.get(email),
 			refreshUsageForAccount: vi
 				.fn()
-				.mockImplementation(async () => usages.get(activeEmail)),
+				.mockImplementation(async () =>
+					freshUsageResult(getRequiredUsage(usages, activeEmail)),
+				),
 			subscribeUsageObserver,
 		} as never);
 		const ctx = createContext({ setStatus });
@@ -737,7 +758,9 @@ describe("active usage observer lifecycle", () => {
 			getCachedUsage: (email: string) => usages.get(email),
 			refreshUsageForAccount: vi
 				.fn()
-				.mockImplementation(async () => usages.get("a@example.com")),
+				.mockImplementation(async () =>
+					freshUsageResult(getRequiredUsage(usages, "a@example.com")),
+				),
 			subscribeUsageObserver,
 		} as never);
 		const ctxA = createContext({ setStatus: setStatusA });
@@ -798,7 +821,9 @@ describe("active usage observer lifecycle", () => {
 			getCachedUsage: (email: string) => usages.get(email),
 			refreshUsageForAccount: vi
 				.fn()
-				.mockImplementation(async () => usages.get(activeEmail)),
+				.mockImplementation(async () =>
+					freshUsageResult(getRequiredUsage(usages, activeEmail)),
+				),
 			subscribeUsageObserver,
 		} as never);
 		const firstContext = createContext({ setStatus });

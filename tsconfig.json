@@ -11,9 +11,7 @@
 	"include": [
 		"abort-utils.ts",
 		"account-manager.ts",
-		"browser.ts",
-		"account-manager.ts",
-		"abort-utils.ts",
+		"auth.ts",
 		"browser.ts",
 		"commands.ts",
 		"extension.test.ts",
@@ -25,9 +23,12 @@
 		"provider.ts",
 		"quota.ts",
 		"selection.ts",
+		"shared/**/*.ts",
+		"status.ts",
 		"storage.ts",
 		"stream-wrapper.ts",
 		"usage-client.ts",
+		"usage-coordination/**/*.ts",
 		"usage-coordinator.ts",
 		"usage.ts",
 		"vitest.config.ts"

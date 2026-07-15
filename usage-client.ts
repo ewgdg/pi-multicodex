@@ -1,5 +1,6 @@
-import { createTimeoutController } from "./abort-utils";
+import { createLinkedAbortController } from "./abort-utils";
 import { type CodexUsageSnapshot, parseCodexUsageResponse } from "./usage";
+import { UsageAuthenticationError } from "./usage-coordination/contracts";
 
 interface WhamUsageResponse {
 	plan_type?: string;
@@ -18,15 +19,23 @@ interface WhamUsageWindow {
 	used_percent?: number;
 }
 
+export class CodexUsageRequestTimeoutError extends Error {
+	override readonly name = "CodexUsageRequestTimeoutError";
+}
+
 export async function fetchCodexUsage(
 	accessToken: string,
 	accountId: string | undefined,
 	options?: { signal?: AbortSignal; timeoutMs?: number },
 ): Promise<CodexUsageSnapshot> {
-	const { controller, clear } = createTimeoutController(
-		options?.signal,
-		options?.timeoutMs ?? 10_000,
-	);
+	const controller = createLinkedAbortController(options?.signal);
+	const timeoutMs = options?.timeoutMs ?? 10_000;
+	let timedOut = false;
+	const timeout = setTimeout(() => {
+		timedOut = true;
+		controller.abort();
+	}, timeoutMs);
+	timeout.unref?.();
 
 	try {
 		const headers: Record<string, string> = {
@@ -43,12 +52,25 @@ export async function fetchCodexUsage(
 		});
 
 		if (!response.ok) {
+			if (response.status === 401 || response.status === 403) {
+				throw new UsageAuthenticationError(
+					`Usage request authentication failed: ${response.status}`,
+				);
+			}
 			throw new Error(`Usage request failed: ${response.status}`);
 		}
 
 		const data = (await response.json()) as WhamUsageResponse;
 		return { ...parseCodexUsageResponse(data), fetchedAt: Date.now() };
+	} catch (error) {
+		if (timedOut) {
+			throw new CodexUsageRequestTimeoutError(
+				`Usage request timed out after ${timeoutMs}ms.`,
+				{ cause: error },
+			);
+		}
+		throw error;
 	} finally {
-		clear();
+		clearTimeout(timeout);
 	}
 }

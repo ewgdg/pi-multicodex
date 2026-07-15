@@ -568,14 +568,17 @@ export function createUsageStatusController(accountManager: AccountManager) {
 		if (!activeAccount) return;
 
 		const cachedUsage = accountManager.getCachedUsage(activeAccount.email);
-		const usage =
-			(await accountManager.refreshUsageForAccount(activeAccount, {
+		const refreshResult = await accountManager.refreshUsageForAccount(
+			activeAccount,
+			{
 				warningHandler: (message) => {
 					if (isCurrentContext(ctx, version)) {
 						withLiveContext(ctx, () => ctx.ui.notify(message, "warning"));
 					}
 				},
-			})) ?? cachedUsage;
+			},
+		);
+		const usage = refreshResult.snapshot ?? cachedUsage;
 		if (!isCurrentContext(ctx, version)) return;
 		syncUsageObserverForContext(ctx);
 		const canRender = withLiveContext(ctx, () => {

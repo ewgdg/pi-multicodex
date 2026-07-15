@@ -24,9 +24,17 @@ import {
 	isFreshUsageHealthyForQuotaCooldown,
 } from "./usage";
 import { fetchCodexUsage } from "./usage-client";
-import { getUsageCoordinator } from "./usage-coordinator";
+import {
+	isFreshUsageConfirmation,
+	PRODUCTION_USAGE_COORDINATION_POLICY,
+	UsageAuthenticationError,
+	type UsageCoordinationDiagnostic,
+	type UsageRefreshResult,
+} from "./usage-coordination/index";
+import { getUsageCoordinator, normalizeUsageEmail } from "./usage-coordinator";
 
-const USAGE_REQUEST_TIMEOUT_MS = 10 * 1000;
+const USAGE_REQUEST_TIMEOUT_MS =
+	PRODUCTION_USAGE_COORDINATION_POLICY.usageRequestTimeoutMs;
 const QUOTA_COOLDOWN_MS = 60 * 60 * 1000;
 const PI_AUTH_SYNC_RETRY_DELAYS_MS = [25, 50] as const;
 
@@ -34,7 +42,7 @@ type WarningHandler = (message: string) => void;
 type StateChangeHandler = () => void;
 type InitializationToken = symbol;
 
-interface UsageRefreshOptions {
+export interface UsageRefreshOptions {
 	force?: boolean;
 	signal?: AbortSignal;
 	warningHandler?: WarningHandler;
@@ -72,6 +80,7 @@ export class AccountManager {
 	private readyPromise: Promise<void> = Promise.resolve();
 	private readyResolve?: () => void;
 	private initializationToken?: InitializationToken;
+	private usageWarningUnsubscribe?: () => void;
 
 	constructor() {
 		this.data = loadStorage();
@@ -142,10 +151,19 @@ export class AccountManager {
 
 	setWarningHandler(handler?: WarningHandler): void {
 		this.warningHandler = handler;
+		this.usageWarningUnsubscribe?.();
+		this.usageWarningUnsubscribe = handler
+			? this.usageCoordinator.onWarning((warning) => handler(warning.message))
+			: undefined;
 	}
 
 	resetSessionWarnings(): void {
 		this.warnedAuthFailureEmails.clear();
+		this.usageCoordinator.resetWarnings();
+	}
+
+	getUsageDiagnostics(): readonly UsageCoordinationDiagnostic[] {
+		return this.usageCoordinator.getDiagnostics();
 	}
 
 	notifyRotationSkipForAuthFailure(account: Account, error: unknown): void {
@@ -554,7 +572,10 @@ export class AccountManager {
 				signal: options?.signal,
 				warningHandler: options?.warningHandler,
 			});
-			if (isFreshUsageHealthyForQuotaCooldown(usage)) {
+			if (
+				isFreshUsageConfirmation(usage) &&
+				isFreshUsageHealthyForQuotaCooldown(usage.snapshot)
+			) {
 				account.quotaExhaustedUntil = undefined;
 				cleared += 1;
 			}
@@ -570,7 +591,7 @@ export class AccountManager {
 	removeAccount(email: string): boolean {
 		const account = this.getAccount(email);
 		if (!account) return false;
-		this.usageCoordinator.invalidate(account);
+		this.usageCoordinator.forget(account);
 		const removed = this.removeAccountRecord(account);
 		if (!removed) return false;
 		this.save();
@@ -601,7 +622,12 @@ export class AccountManager {
 		account: Account,
 		options: { signal?: AbortSignal },
 	): Promise<CodexUsageSnapshot> {
-		const token = await this.ensureValidToken(account);
+		let token: string;
+		try {
+			token = await this.ensureValidToken(account);
+		} catch (error) {
+			throw new UsageAuthenticationError(normalizeUnknownError(error));
+		}
 		return fetchCodexUsage(token, account.accountId, {
 			signal: options.signal,
 			timeoutMs: USAGE_REQUEST_TIMEOUT_MS,
@@ -630,11 +656,16 @@ export class AccountManager {
 	async refreshUsageForAccount(
 		account: Account,
 		options?: UsageRefreshOptions,
-	): Promise<CodexUsageSnapshot | undefined> {
-		if (account.needsReauth) return this.getCachedUsage(account.email);
+	): Promise<UsageRefreshResult> {
+		if (account.needsReauth) {
+			return {
+				...this.usageCoordinator.getCachedResult(account),
+				error: new UsageAuthenticationError("re-authentication required"),
+			};
+		}
 
 		try {
-			return await this.usageCoordinator.refresh(
+			const result = await this.usageCoordinator.refresh(
 				account,
 				(_usageAccount, request) =>
 					this.fetchUsageSnapshotForAccount(account, request),
@@ -643,23 +674,48 @@ export class AccountManager {
 					signal: options?.signal,
 				},
 			);
+			if (result.error) {
+				(options?.warningHandler ?? this.warningHandler)?.(
+					`Multicodex: failed to fetch usage for ${account.email}: ${normalizeUnknownError(
+						result.error,
+					)}`,
+				);
+			}
+			if (
+				result.warning &&
+				options?.warningHandler &&
+				options.warningHandler !== this.warningHandler
+			) {
+				options.warningHandler(result.warning.message);
+			}
+			return result;
 		} catch (error) {
 			(options?.warningHandler ?? this.warningHandler)?.(
 				`Multicodex: failed to fetch usage for ${account.email}: ${normalizeUnknownError(
 					error,
 				)}`,
 			);
-			return undefined;
+			return {
+				...this.usageCoordinator.getCachedResult(account),
+				error,
+			};
 		}
 	}
 
 	async refreshUsageForAllAccounts(
 		options?: UsageRefreshOptions,
-	): Promise<void> {
+	): Promise<Record<string, UsageRefreshResult>> {
 		const accounts = this.getAccounts();
-		await Promise.all(
-			accounts.map((account) => this.refreshUsageForAccount(account, options)),
+		const entries = await Promise.all(
+			accounts.map(
+				async (account) =>
+					[
+						normalizeUsageEmail(account.email),
+						await this.refreshUsageForAccount(account, options),
+					] as const,
+			),
 		);
+		return Object.fromEntries(entries);
 	}
 
 	async refreshUsageIfStale(
@@ -714,7 +770,7 @@ export class AccountManager {
 			warningHandler: options?.warningHandler,
 		});
 		const now = Date.now();
-		const resetAt = getQuotaCooldownResetAt(usage, now);
+		const resetAt = getQuotaCooldownResetAt(usage.snapshot, now);
 		const fallback = now + QUOTA_COOLDOWN_MS;
 		const until = resetAt && resetAt > now ? resetAt : fallback;
 		this.markExhausted(account.email, until);
