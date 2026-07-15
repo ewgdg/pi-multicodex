@@ -36,6 +36,10 @@ _Avoid_: OpenAI account ID, display email
 Durable, credential-free usage snapshots and refresh coordination metadata shared within one usage coordination scope. Each managed account identity has one mutable state document.
 _Avoid_: Shared coordinator, shared account storage
 
+**Refresh outcome**:
+Credential-free completion status for one refresh attempt, recorded separately from snapshot data so stale usage cannot masquerade as fresh confirmation.
+_Avoid_: Cached error, snapshot status
+
 **Locally available snapshot**:
 A validated usage snapshot usable by one process when cross-process publication fails. It does not renew shared freshness and may be superseded during later reconciliation.
 _Avoid_: Accepted shared snapshot, successful publication
@@ -67,6 +71,10 @@ _Avoid_: Shared promise, owner process work
 **Refresh lease**:
 An expiring per-account filesystem claim that suppresses duplicate refresh work during normal operation. It is not strict ownership: stale recovery may overlap a resumed owner, and the last published state may temporarily win.
 _Avoid_: File lock, correctness boundary
+
+**State-write lease**:
+A short expiring per-account filesystem claim that serializes ordinary read-merge-publish mutations of shared usage state. Crash recovery may overlap a suspended writer, so it reduces lost updates without claiming strict mutual exclusion.
+_Avoid_: Permanent lock, transaction lock
 
 **Retry suppression**:
 A short shared period after failed refresh work during which automatic requests retain stale status without starting another API call. It does not make a snapshot fresh, and forced requests bypass it.
