@@ -556,6 +556,7 @@ export class AccountManager {
 	}): Promise<number> {
 		const now = Date.now();
 		let cleared = 0;
+		let changed = false;
 
 		for (const account of this.getAccounts()) {
 			if (!account.quotaExhaustedUntil) continue;
@@ -564,6 +565,7 @@ export class AccountManager {
 			if (account.quotaExhaustedUntil <= now) {
 				account.quotaExhaustedUntil = undefined;
 				cleared += 1;
+				changed = true;
 				continue;
 			}
 
@@ -572,16 +574,21 @@ export class AccountManager {
 				signal: options?.signal,
 				warningHandler: options?.warningHandler,
 			});
+			if (!account.quotaExhaustedUntil) {
+				cleared += 1;
+				continue;
+			}
 			if (
 				isFreshUsageConfirmation(usage) &&
 				isFreshUsageHealthyForQuotaCooldown(usage.snapshot)
 			) {
 				account.quotaExhaustedUntil = undefined;
 				cleared += 1;
+				changed = true;
 			}
 		}
 
-		if (cleared > 0) {
+		if (changed) {
 			this.save();
 			this.notifyStateChanged();
 		}
@@ -688,6 +695,7 @@ export class AccountManager {
 			) {
 				options.warningHandler(result.warning.message);
 			}
+			this.clearQuotaCooldownAfterFreshWeeklyUsage(account, result);
 			return result;
 		} catch (error) {
 			(options?.warningHandler ?? this.warningHandler)?.(
@@ -700,6 +708,27 @@ export class AccountManager {
 				error,
 			};
 		}
+	}
+
+	private clearQuotaCooldownAfterFreshWeeklyUsage(
+		account: Account,
+		result: UsageRefreshResult,
+	): void {
+		const weeklyUsedPercent = result.snapshot?.secondary?.usedPercent;
+		if (
+			!account.quotaExhaustedUntil ||
+			!isFreshUsageConfirmation(result) ||
+			typeof weeklyUsedPercent !== "number" ||
+			weeklyUsedPercent <= 0
+		) {
+			return;
+		}
+
+		// A fresh weekly reading is authoritative over the local marker, which can
+		// otherwise survive an account's recovered quota state indefinitely.
+		account.quotaExhaustedUntil = undefined;
+		this.save();
+		this.notifyStateChanged();
 	}
 
 	async refreshUsageForAllAccounts(

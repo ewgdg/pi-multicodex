@@ -107,7 +107,7 @@ You can customize which fields appear and their ordering with `/multicodex foote
 - **Auth import.** When pi has stored Codex OAuth credentials, MultiCodex imports them automatically into the same managed account pool used by manually added accounts and labels that account as `pi auth` in the UI.
 - **Token refresh.** OAuth tokens are refreshed before expiry so requests do not fail due to stale credentials. You can also force a health refresh with `/multicodex refresh` or re-authenticate explicitly with `/multicodex reauth`.
 - **Usage tracking.** Pi runtimes using the same agent directory share credential-free usage snapshots and normally coalesce per-account refresh work through advisory filesystem leases. Completed managed responses publish pending invalidation even in headless runtimes. Active observers reconcile at least every 30 seconds; there is no idle polling. When available, Codex plan metadata is used as a capacity hint for rotation scoring.
-- **Quota cooldown.** When an account is exhausted, it stays on cooldown until the exhausted or most constrained known reset window clears (or 1 hour if reset time is unknown).
+- **Quota cooldown.** When an account is exhausted, it stays on cooldown until the exhausted or most constrained known reset window clears (or 1 hour if reset time is unknown). A fresh refresh that reports nonzero weekly usage clears a stale cooldown marker.
 - **Self-contained utility seams.** Stream primitives and `~/.pi/agent/*` path helpers live under `shared/` so the published package does not depend on a separate utility package for runtime wiring. MultiCodex still owns account storage, token policy, footer behavior, and command UX.
 
 ## Local development

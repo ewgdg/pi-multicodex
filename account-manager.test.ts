@@ -793,6 +793,23 @@ describe("AccountManager quota cooldown reconciliation", () => {
 		expect(mocks.saveStorage).toHaveBeenCalledTimes(1);
 	});
 
+	it("clears a quota cooldown whenever a fresh refresh reports weekly usage", async () => {
+		mocks.fetchCodexUsage.mockResolvedValue({
+			primary: { usedPercent: 100, allowed: false, limitReached: true },
+			secondary: { usedPercent: 12, allowed: true, limitReached: false },
+			fetchedAt: Date.now(),
+		});
+
+		const manager = new AccountManager();
+		const account = manager.getAccount("cooldown@example.com");
+		if (!account) throw new Error("account missing");
+
+		await manager.refreshUsageForAccount(account, { force: true });
+
+		expect(account.quotaExhaustedUntil).toBeUndefined();
+		expect(mocks.saveStorage).toHaveBeenCalledTimes(1);
+	});
+
 	it("keeps quota cooldown when healthy-looking usage is only locally available", async () => {
 		const sharedCoordination = createInMemoryUsageCoordination();
 		vi.spyOn(sharedCoordination, "refresh").mockResolvedValue({
@@ -845,9 +862,7 @@ describe("AccountManager quota cooldown reconciliation", () => {
 		expect(mocks.saveStorage).not.toHaveBeenCalled();
 	});
 
-	it("keeps quota cooldown when fresh usage remains near the limit boundary", async () => {
-		const originalCooldown = mocks.storageData.accounts[0]
-			?.quotaExhaustedUntil as number;
+	it("clears quota cooldown when fresh weekly usage is nonzero near the limit boundary", async () => {
 		mocks.fetchCodexUsage.mockResolvedValue({
 			primary: {
 				usedPercent: 99.6,
@@ -867,11 +882,11 @@ describe("AccountManager quota cooldown reconciliation", () => {
 		const manager = new AccountManager();
 		const cleared = await manager.reconcileQuotaCooldowns();
 
-		expect(cleared).toBe(0);
+		expect(cleared).toBe(1);
 		expect(
 			manager.getAccount("cooldown@example.com")?.quotaExhaustedUntil,
-		).toBe(originalCooldown);
-		expect(mocks.saveStorage).not.toHaveBeenCalled();
+		).toBeUndefined();
+		expect(mocks.saveStorage).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not clear cooldown from a previously fresh snapshot after forced refresh failure", async () => {
