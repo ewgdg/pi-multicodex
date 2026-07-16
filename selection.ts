@@ -27,7 +27,7 @@ export interface CacheAffinityContext {
 interface RotationCandidate {
 	account: Account;
 	usage: CodexUsageSnapshot;
-	primaryRemainingUnits: number;
+	primaryRemainingUnits?: number;
 	weeklyRemainingUnits?: number;
 	effectiveRemainingUnits: number;
 	weeklyBurnPressure: number;
@@ -39,11 +39,6 @@ interface RotationCandidate {
 export function isAccountAvailable(account: Account, now: number): boolean {
 	if (account.needsReauth) return false;
 	return !account.quotaExhaustedUntil || account.quotaExhaustedUntil <= now;
-}
-
-function pickRandomAccount(accounts: Account[]): Account | undefined {
-	if (accounts.length === 0) return undefined;
-	return accounts[Math.floor(Math.random() * accounts.length)];
 }
 
 function getRemainingPercent(usedPercent?: number): number | undefined {
@@ -59,7 +54,8 @@ function getHoursUntilFutureReset(
 	return Math.max(MIN_WEEKLY_RESET_HOURS, (resetAt - now) / 3_600_000);
 }
 
-function getPrimaryGatePenalty(primaryRemainingUnits: number): number {
+function getPrimaryGatePenalty(primaryRemainingUnits?: number): number {
+	if (primaryRemainingUnits === undefined) return 0;
 	if (primaryRemainingUnits <= PRIMARY_NEAR_ZERO_UNITS) return -1;
 	if (primaryRemainingUnits <= PRIMARY_THIN_UNITS) return -0.25;
 	return 0;
@@ -101,13 +97,14 @@ function buildCandidate(
 	const primaryRemainingPercent = getRemainingPercent(
 		usage.primary?.usedPercent,
 	);
-	if (primaryRemainingPercent === undefined) return undefined;
-
 	const weeklyRemainingPercent = getRemainingPercent(
 		usage.secondary?.usedPercent,
 	);
 	const multiplier = getPlanCapacityMultiplier(usage.planType);
-	const primaryRemainingUnits = (primaryRemainingPercent / 100) * multiplier;
+	const primaryRemainingUnits =
+		primaryRemainingPercent === undefined
+			? undefined
+			: (primaryRemainingPercent / 100) * multiplier;
 	const weeklyRemainingUnits =
 		weeklyRemainingPercent === undefined
 			? undefined
@@ -115,7 +112,10 @@ function buildCandidate(
 	const effectiveRemainingUnits =
 		weeklyRemainingUnits === undefined
 			? primaryRemainingUnits
-			: Math.min(primaryRemainingUnits, weeklyRemainingUnits);
+			: primaryRemainingUnits === undefined
+				? weeklyRemainingUnits
+				: Math.min(primaryRemainingUnits, weeklyRemainingUnits);
+	if (effectiveRemainingUnits === undefined) return undefined;
 	const weeklyResetAt = getWeeklyResetAt(usage) ?? Number.MAX_SAFE_INTEGER;
 	const hoursUntilWeeklyReset = getHoursUntilFutureReset(weeklyResetAt, now);
 	const weeklyBurnPressure =
@@ -141,7 +141,7 @@ function scoreCandidates(
 	cacheAffinity?: CacheAffinityContext,
 ): RotationCandidate[] {
 	const maxPrimary = Math.max(
-		...candidates.map((candidate) => candidate.primaryRemainingUnits),
+		...candidates.map((candidate) => candidate.primaryRemainingUnits ?? 0),
 		0,
 	);
 	const maxEffective = Math.max(
@@ -155,7 +155,7 @@ function scoreCandidates(
 
 	return candidates.map((candidate) => {
 		const primaryScore = Math.sqrt(
-			normalize(candidate.primaryRemainingUnits, maxPrimary),
+			normalize(candidate.primaryRemainingUnits ?? 0, maxPrimary),
 		);
 		const effectiveScore = normalize(
 			candidate.effectiveRemainingUnits,
@@ -215,9 +215,14 @@ export function pickBestAccount(
 		(a, b) => {
 			const scoreDiff = b.score - a.score;
 			if (scoreDiff !== 0) return scoreDiff;
-			return a.weeklyResetAt - b.weeklyResetAt;
+			const resetDiff = a.weeklyResetAt - b.weeklyResetAt;
+			if (resetDiff !== 0) return resetDiff;
+			return a.account.email.localeCompare(b.account.email);
 		},
 	);
 
-	return ranked[0]?.account ?? pickRandomAccount(available);
+	return (
+		ranked[0]?.account ??
+		[...available].sort((a, b) => a.email.localeCompare(b.email))[0]
+	);
 }

@@ -452,7 +452,55 @@ describe("pickBestAccount", () => {
 	it("falls back to available account when usage is unknown", () => {
 		const accounts = [makeAccount("a"), makeAccount("b")];
 		const selected = pickBestAccount(accounts, new Map(), { now: 0 });
-		expect(["a", "b"]).toContain(selected?.email);
+		expect(selected?.email).toBe("a");
+	});
+
+	it("uses weekly quota to rank accounts when 5-hour quota is unavailable", () => {
+		const accounts = [makeAccount("gmail"), makeAccount("outlook")];
+		const usage = new Map([
+			[
+				"gmail",
+				{
+					planType: "plus",
+					secondary: { usedPercent: 10, resetAt: 24 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+			[
+				"outlook",
+				{
+					planType: "plus",
+					secondary: { usedPercent: 90, resetAt: 24 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+		]);
+
+		expect(pickBestAccount(accounts, usage, { now: 0 })?.email).toBe("gmail");
+	});
+
+	it("uses 5-hour quota to rank accounts when weekly quota is unavailable", () => {
+		const accounts = [makeAccount("gmail"), makeAccount("outlook")];
+		const usage = new Map([
+			[
+				"gmail",
+				{
+					planType: "plus",
+					primary: { usedPercent: 10, resetAt: 5 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+			[
+				"outlook",
+				{
+					planType: "plus",
+					primary: { usedPercent: 90, resetAt: 5 * 60 * 60 * 1000 },
+					fetchedAt: 0,
+				},
+			],
+		]);
+
+		expect(pickBestAccount(accounts, usage, { now: 0 })?.email).toBe("gmail");
 	});
 
 	it("ignores exhausted accounts", () => {
