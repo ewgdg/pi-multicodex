@@ -25,7 +25,7 @@ vi.mock("./auth", () => ({
 	watchImportedOpenAICodexAuth: mocks.watchImportedOpenAICodexAuth,
 }));
 
-vi.mock("@earendil-works/pi-ai/oauth", () => ({
+vi.mock("./codex-oauth", () => ({
 	refreshOpenAICodexToken: vi.fn(),
 }));
 

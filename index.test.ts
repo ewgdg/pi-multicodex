@@ -1,4 +1,4 @@
-import { getModels } from "@earendil-works/pi-ai";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { describe, expect, it, vi } from "vitest";
 import {
 	type Account,
@@ -42,7 +42,7 @@ describe("isQuotaErrorMessage", () => {
 
 describe("getOpenAICodexMirror", () => {
 	it("mirrors the openai-codex provider models exactly (metadata)", () => {
-		const sourceModels = getModels("openai-codex");
+		const sourceModels = getBuiltinModels("openai-codex");
 		const expected = {
 			baseUrl: sourceModels[0]?.baseUrl || "https://chatgpt.com/backend-api",
 			models: sourceModels.map((m) => ({
@@ -83,7 +83,7 @@ describe("buildMulticodexProviderConfig", () => {
 		expect(config.apiKey).toBe("test-jwt.eyJ0ZXN0IjoxfQ.sig");
 		expect(config.baseUrl).toBe(mirror.baseUrl);
 		expect(config.models).toEqual(mirror.models);
-		expect(typeof config.streamSimple).toBe("function");
+		expect(config.streamSimple).toBeTypeOf("function");
 	});
 });
 

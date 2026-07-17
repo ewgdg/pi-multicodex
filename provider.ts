@@ -1,4 +1,5 @@
-import { getApiProvider, getModels } from "@earendil-works/pi-ai";
+import { streamSimple as streamOpenAICodex } from "@earendil-works/pi-ai/api/openai-codex-responses";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { AccountManager } from "./account-manager";
 import { createStreamWrapper } from "./stream-wrapper";
@@ -11,7 +12,7 @@ export function getOpenAICodexMirror(): {
 	baseUrl: string;
 	models: ProviderModelConfig[];
 } {
-	const sourceModels = getModels("openai-codex");
+	const sourceModels = getBuiltinModels("openai-codex");
 	return {
 		baseUrl: sourceModels[0]?.baseUrl ?? "https://chatgpt.com/backend-api",
 		models: sourceModels.map((m) => ({
@@ -50,18 +51,13 @@ function getActiveApiKey(accountManager: AccountManager): string {
 
 export function buildMulticodexProviderConfig(accountManager: AccountManager) {
 	const mirror = getOpenAICodexMirror();
-	const baseProvider = getApiProvider("openai-codex-responses");
-	if (!baseProvider) {
-		throw new Error(
-			"OpenAI Codex provider not available. Please update pi to include openai-codex support.",
-		);
-	}
-
 	return {
 		baseUrl: mirror.baseUrl,
 		apiKey: getActiveApiKey(accountManager),
 		api: "openai-codex-responses" as const,
-		streamSimple: createStreamWrapper(accountManager, baseProvider),
+		streamSimple: createStreamWrapper(accountManager, {
+			streamSimple: streamOpenAICodex,
+		}),
 		models: mirror.models,
 	};
 }

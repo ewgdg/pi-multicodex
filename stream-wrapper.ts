@@ -36,7 +36,7 @@ function producedOutput(event: AssistantMessageEvent): boolean {
 
 type ApiProviderRef = {
 	streamSimple: (
-		model: Model<Api>,
+		model: Model<"openai-codex-responses">,
 		context: Context,
 		options?: SimpleStreamOptions,
 	) => AssistantMessageEventStream;

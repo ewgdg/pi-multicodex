@@ -17,7 +17,7 @@ The upstream (`victor-software-house/pi-multicodex`) is no longer maintained. Th
 - **Renamed package.** Published as `@ewgdg/pi-multicodex`.
 - **Self-contained.** Removed `pi-provider-utils` dependency — runtime utility seams live under `shared/` so the package works without pulling in extra dependencies.
 - **Non-Codex model handling.** Skips MultiCodex startup entirely when the session model isn't a Codex model — no spurious errors or footer clutter.
-- **Ongoing pi version compatibility.** Updated through pi 0.74+ scope changes and session event interfaces.
+- **Ongoing pi version compatibility.** Compatible with pi 0.80.8+ and its Models runtime/provider-auth interfaces.
 
 ### Rotation policy
 

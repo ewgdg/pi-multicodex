@@ -1,6 +1,5 @@
 import { promises as fs, constants as fsConstants } from "node:fs";
 import path from "node:path";
-import { loginOpenAICodex } from "@earendil-works/pi-ai/oauth";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -17,6 +16,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { AccountManager } from "./account-manager";
 import { openLoginInBrowser } from "./browser";
+import { loginOpenAICodex } from "./codex-oauth";
 import { getAgentSettingsPath } from "./shared/agent-paths";
 import { normalizeUnknownError } from "./shared/streams";
 import {
@@ -242,12 +242,34 @@ async function loginAndActivateAccount(
 		);
 
 		const creds = await loginOpenAICodex({
-			onAuth: ({ url }) => {
-				void openLoginInBrowser(pi, ctx, url);
-				ctx.ui.notify(`Please open this URL to login: ${url}`, "info");
-				console.log(`[multicodex] Login URL: ${url}`);
+			notify: (event) => {
+				if (event.type === "auth_url") {
+					void openLoginInBrowser(pi, ctx, event.url);
+					ctx.ui.notify(`Please open this URL to login: ${event.url}`, "info");
+					console.log(`[multicodex] Login URL: ${event.url}`);
+					return;
+				}
+				if (event.type === "device_code") {
+					ctx.ui.notify(
+						`Open ${event.verificationUri} and enter code: ${event.userCode}`,
+						"info",
+					);
+					return;
+				}
+				if (event.type === "info" || event.type === "progress") {
+					ctx.ui.notify(event.message, "info");
+				}
 			},
-			onPrompt: async ({ message }) => (await ctx.ui.input(message)) || "",
+			prompt: async (prompt) => {
+				if (prompt.type === "select") {
+					const labels = prompt.options.map((option) => option.label);
+					const selected = await ctx.ui.select(prompt.message, labels);
+					return (
+						prompt.options.find((option) => option.label === selected)?.id ?? ""
+					);
+				}
+				return (await ctx.ui.input(prompt.message, prompt.placeholder)) || "";
+			},
 		});
 
 		const account = accountManager.addOrUpdateAccount(identifier, creds);

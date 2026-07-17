@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountManager } from "./account-manager";
 
 // Mock the oauth module before anything imports it.
-vi.mock("@earendil-works/pi-ai/oauth", () => ({
+vi.mock("./codex-oauth", () => ({
 	refreshOpenAICodexToken: vi.fn(),
 }));
 
@@ -27,7 +27,7 @@ vi.mock("./auth", () => ({
 	loadImportedOpenAICodexAuth: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { refreshOpenAICodexToken } from "@earendil-works/pi-ai/oauth";
+import { refreshOpenAICodexToken } from "./codex-oauth";
 
 describe("AccountManager.ensureValidToken — concurrent refresh deduplication", () => {
 	let manager: AccountManager;

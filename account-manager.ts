@@ -1,11 +1,9 @@
-import {
-	type OAuthCredentials,
-	refreshOpenAICodexToken,
-} from "@earendil-works/pi-ai/oauth";
+import type { OAuthCredentials } from "@earendil-works/pi-ai/oauth";
 import {
 	loadImportedOpenAICodexAuth,
 	watchImportedOpenAICodexAuth,
 } from "./auth";
+import { refreshOpenAICodexToken } from "./codex-oauth";
 import {
 	type CacheAffinityContext,
 	isAccountAvailable,
