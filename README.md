@@ -124,7 +124,7 @@ npm pack --dry-run    # verify package contents
 Run the extension directly during development:
 
 ```bash
-pi -e ./index.ts
+pi -e ./src/index.ts
 ```
 
 ## Data storage

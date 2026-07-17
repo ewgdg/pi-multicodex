@@ -16,7 +16,7 @@
 	],
 	"pi": {
 		"extensions": [
-			"./index.ts"
+			"./src/index.ts"
 		],
 		"image": "https://raw.githubusercontent.com/ewgdg/pi-multicodex/main/assets/multicodex-main.png"
 	},
@@ -30,31 +30,12 @@
 	},
 	"author": "ewgdg",
 	"files": [
-		"abort-utils.ts",
-		"account-manager.ts",
-		"auth.ts",
-		"browser.ts",
-		"codex-oauth.ts",
-		"codex-provider.ts",
-		"commands.ts",
-		"extension.ts",
-		"hooks.ts",
-		"index.ts",
-		"provider.ts",
-		"quota.ts",
-		"selection.ts",
-		"status.ts",
-		"storage.ts",
-		"stream-wrapper.ts",
-		"usage-client.ts",
-		"usage-coordinator.ts",
-		"usage-coordination/**",
-		"usage.ts",
+		"src/**/*.ts",
+		"!src/**/*.test.ts",
 		"README.md",
 		"LICENSE",
 		"assets/**",
-		"schemas/**",
-		"shared/**"
+		"schemas/**"
 	],
 	"scripts": {
 		"lint": "biome check .",
