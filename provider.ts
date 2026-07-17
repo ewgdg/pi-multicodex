@@ -1,10 +1,13 @@
-import { streamSimple as streamOpenAICodex } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { AccountManager } from "./account-manager";
+import {
+	getOpenAICodexProvider,
+	OPENAI_CODEX_PROVIDER_ID,
+} from "./codex-provider";
 import { createStreamWrapper } from "./stream-wrapper";
 
-export const PROVIDER_ID = "openai-codex";
+export const PROVIDER_ID = OPENAI_CODEX_PROVIDER_ID;
 
 export type ProviderModelDef = ProviderModelConfig;
 
@@ -51,13 +54,12 @@ function getActiveApiKey(accountManager: AccountManager): string {
 
 export function buildMulticodexProviderConfig(accountManager: AccountManager) {
 	const mirror = getOpenAICodexMirror();
+	const codexProvider = getOpenAICodexProvider();
 	return {
 		baseUrl: mirror.baseUrl,
 		apiKey: getActiveApiKey(accountManager),
 		api: "openai-codex-responses" as const,
-		streamSimple: createStreamWrapper(accountManager, {
-			streamSimple: streamOpenAICodex,
-		}),
+		streamSimple: createStreamWrapper(accountManager, codexProvider),
 		models: mirror.models,
 	};
 }

@@ -35,6 +35,7 @@
 		"auth.ts",
 		"browser.ts",
 		"codex-oauth.ts",
+		"codex-provider.ts",
 		"commands.ts",
 		"extension.ts",
 		"hooks.ts",

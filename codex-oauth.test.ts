@@ -11,8 +11,10 @@ const mocks = vi.hoisted(() => ({
 		| undefined,
 }));
 
-vi.mock("@earendil-works/pi-ai/providers/openai-codex", () => ({
-	openaiCodexProvider: () => ({ auth: { oauth: mocks.oauth } }),
+vi.mock("@earendil-works/pi-ai/providers/all", () => ({
+	builtinProviders: () => [
+		{ id: "openai-codex", auth: { oauth: mocks.oauth } },
+	],
 }));
 
 import { loginOpenAICodex, refreshOpenAICodexToken } from "./codex-oauth";

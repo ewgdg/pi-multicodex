@@ -1,7 +1,7 @@
-import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
+import { getOpenAICodexProvider } from "./codex-provider";
 
 function getOpenAICodexOAuth() {
-	const oauth = openaiCodexProvider().auth.oauth;
+	const oauth = getOpenAICodexProvider().auth.oauth;
 	if (!oauth) {
 		throw new Error("OpenAI Codex OAuth is unavailable in this version of pi.");
 	}
