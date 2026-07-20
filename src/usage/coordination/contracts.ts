@@ -69,6 +69,7 @@ export interface UsageRefreshResult {
 
 export function isFreshUsageConfirmation(result: UsageRefreshResult): boolean {
 	return (
+		result.error === undefined &&
 		result.availability === "fresh" &&
 		(result.source === "owned-fetch" || result.source === "joined-work") &&
 		result.refreshOutcome?.outcome === "success"

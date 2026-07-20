@@ -194,8 +194,7 @@ export class InMemoryUsageCoordination implements SharedUsageCoordination {
 	): Promise<UsageRefreshResult> {
 		const normalize = (result: UsageRefreshResult): UsageRefreshResult => {
 			if (owner) return result;
-			const { error: _error, ...shared } = result;
-			return { ...shared, source: "joined-work" };
+			return { ...result, source: "joined-work" };
 		};
 		return waitForDetached(promise.then(normalize), signal, () => ({
 			availability: "unavailable",

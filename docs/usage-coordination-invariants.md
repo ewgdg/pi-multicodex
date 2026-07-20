@@ -33,7 +33,7 @@ This maps the hard cross-process usage invariants to observable tests. Filesyste
 | A crashed state writer recovers without exposing partial canonical state | real-process state-writer termination test |
 | Missed watcher hints and likely-sleep gaps reconcile from canonical state | real-process missed-hint test and deterministic `UsageCoordinator` likely-sleep test |
 | Explicit refresh reports success only for fresh confirmation | `commands.test.ts` single/all typed outcome tests |
-| A fresh refresh reporting nonzero weekly usage clears a quota cooldown marker | `account-manager.test.ts` quota reconciliation tests |
+| Fresh 5h remaining usage, or weekly remaining usage when 5h is unknown, clears a quota cooldown and restores selection | `account-manager.test.ts` quota reconciliation tests |
 | Single/all refresh APIs return typed availability and normalized-email keys | shared contract tests and `account-manager.test.ts` typed all-account result test |
 
 Production tests are release-blocking on Linux. The implementation is cross-platform by design; macOS and Windows evidence comes from the completed throwaway filesystem prototype rather than production validation.

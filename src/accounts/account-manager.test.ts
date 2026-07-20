@@ -793,7 +793,9 @@ describe("AccountManager quota cooldown reconciliation", () => {
 		expect(mocks.saveStorage).toHaveBeenCalledTimes(1);
 	});
 
-	it("clears a quota cooldown whenever a fresh refresh reports weekly usage", async () => {
+	it("keeps quota cooldown when the known 5h window is exhausted", async () => {
+		const originalCooldown = mocks.storageData.accounts[0]
+			?.quotaExhaustedUntil as number;
 		mocks.fetchCodexUsage.mockResolvedValue({
 			primary: { usedPercent: 100, allowed: false, limitReached: true },
 			secondary: { usedPercent: 12, allowed: true, limitReached: false },
@@ -806,8 +808,37 @@ describe("AccountManager quota cooldown reconciliation", () => {
 
 		await manager.refreshUsageForAccount(account, { force: true });
 
+		expect(account.quotaExhaustedUntil).toBe(originalCooldown);
+		expect(mocks.saveStorage).not.toHaveBeenCalled();
+	});
+
+	it("uses the known 5h window before an exhausted weekly window", async () => {
+		mocks.fetchCodexUsage.mockResolvedValue({
+			primary: { usedPercent: 99, allowed: true, limitReached: false },
+			secondary: { usedPercent: 100, allowed: false, limitReached: true },
+			fetchedAt: Date.now(),
+		});
+
+		const manager = new AccountManager();
+		const account = manager.getAccount("cooldown@example.com");
+		if (!account) throw new Error("account missing");
+
+		await manager.refreshUsageForAccount(account, { force: true });
+
 		expect(account.quotaExhaustedUntil).toBeUndefined();
-		expect(mocks.saveStorage).toHaveBeenCalledTimes(1);
+	});
+
+	it("selects an account immediately when fresh usage proves its cooldown stale", async () => {
+		mocks.fetchCodexUsage.mockResolvedValue({
+			secondary: { usedPercent: 0, allowed: true, limitReached: false },
+			fetchedAt: Date.now(),
+		});
+
+		const manager = new AccountManager();
+		const selected = await manager.activateBestAccount();
+
+		expect(selected?.email).toBe("cooldown@example.com");
+		expect(selected?.quotaExhaustedUntil).toBeUndefined();
 	});
 
 	it("keeps quota cooldown when healthy-looking usage is only locally available", async () => {
@@ -843,11 +874,29 @@ describe("AccountManager quota cooldown reconciliation", () => {
 			"secondary",
 			{ secondary: { usedPercent: 0, allowed: true, limitReached: false } },
 		],
-	])("keeps quota cooldown when fresh usage is missing the %s window", async (_windowName, partialUsage) => {
+	])("clears quota cooldown when only the %s window reports remaining usage", async (_windowName, partialUsage) => {
+		mocks.fetchCodexUsage.mockResolvedValue({
+			...partialUsage,
+			fetchedAt: Date.now(),
+		});
+
+		const manager = new AccountManager();
+		const cleared = await manager.reconcileQuotaCooldowns();
+
+		expect(cleared).toBe(1);
+		expect(
+			manager.getAccount("cooldown@example.com")?.quotaExhaustedUntil,
+		).toBeUndefined();
+		expect(mocks.fetchCodexUsage).toHaveBeenCalledTimes(1);
+		expect(mocks.saveStorage).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps quota cooldown when fresh usage has no remaining quota", async () => {
 		const originalCooldown = mocks.storageData.accounts[0]
 			?.quotaExhaustedUntil as number;
 		mocks.fetchCodexUsage.mockResolvedValue({
-			...partialUsage,
+			primary: { usedPercent: 100, allowed: false, limitReached: true },
+			secondary: { usedPercent: 100, allowed: false, limitReached: true },
 			fetchedAt: Date.now(),
 		});
 
@@ -858,11 +907,29 @@ describe("AccountManager quota cooldown reconciliation", () => {
 		expect(
 			manager.getAccount("cooldown@example.com")?.quotaExhaustedUntil,
 		).toBe(originalCooldown);
-		expect(mocks.fetchCodexUsage).toHaveBeenCalledTimes(1);
 		expect(mocks.saveStorage).not.toHaveBeenCalled();
 	});
 
-	it("clears quota cooldown when fresh weekly usage is nonzero near the limit boundary", async () => {
+	it("keeps quota cooldown when the effective usage percentage is invalid", async () => {
+		const originalCooldown = mocks.storageData.accounts[0]
+			?.quotaExhaustedUntil as number;
+		mocks.fetchCodexUsage.mockResolvedValue({
+			primary: { usedPercent: -1, allowed: true, limitReached: false },
+			secondary: { usedPercent: 10, allowed: true, limitReached: false },
+			fetchedAt: Date.now(),
+		});
+
+		const manager = new AccountManager();
+		const cleared = await manager.reconcileQuotaCooldowns();
+
+		expect(cleared).toBe(0);
+		expect(
+			manager.getAccount("cooldown@example.com")?.quotaExhaustedUntil,
+		).toBe(originalCooldown);
+		expect(mocks.saveStorage).not.toHaveBeenCalled();
+	});
+
+	it("clears quota cooldown when fresh usage has any remaining quota near the limit boundary", async () => {
 		mocks.fetchCodexUsage.mockResolvedValue({
 			primary: {
 				usedPercent: 99.6,
@@ -904,10 +971,47 @@ describe("AccountManager quota cooldown reconciliation", () => {
 		const account = manager.getAccount("cooldown@example.com");
 		if (!account) throw new Error("account missing");
 		await manager.refreshUsageForAccount(account);
+		manager.markExhausted(account.email, originalCooldown);
 
 		const cleared = await manager.reconcileQuotaCooldowns();
 
 		expect(cleared).toBe(0);
+		expect(account.quotaExhaustedUntil).toBe(originalCooldown);
+	});
+
+	it("does not clear cooldown when a joined forced refresh fails authentication", async () => {
+		mocks.fetchCodexUsage.mockReset();
+		mocks.fetchCodexUsage.mockResolvedValueOnce({
+			primary: { usedPercent: 10, allowed: true, limitReached: false },
+			fetchedAt: Date.now(),
+		});
+		const originalCooldown = mocks.storageData.accounts[0]
+			?.quotaExhaustedUntil as number;
+		const manager = new AccountManager();
+		const account = manager.getAccount("cooldown@example.com");
+		if (!account) throw new Error("account missing");
+		await manager.refreshUsageForAccount(account, { force: true });
+		manager.markExhausted(account.email, originalCooldown);
+
+		let rejectRefresh!: (error: unknown) => void;
+		mocks.fetchCodexUsage.mockImplementationOnce(
+			() =>
+				new Promise((_resolve, reject) => {
+					rejectRefresh = reject;
+				}),
+		);
+		const owner = manager.refreshUsageForAccount(account, { force: true });
+		const joiner = manager.refreshUsageForAccount(account, { force: true });
+		await vi.waitFor(() =>
+			expect(mocks.fetchCodexUsage).toHaveBeenCalledTimes(2),
+		);
+		rejectRefresh(new UsageAuthenticationError("expired"));
+
+		const results = await Promise.all([owner, joiner]);
+		const joinedResult = results.find(
+			(result) => result.source === "joined-work",
+		);
+		expect(joinedResult?.error).toBeInstanceOf(UsageAuthenticationError);
 		expect(account.quotaExhaustedUntil).toBe(originalCooldown);
 	});
 

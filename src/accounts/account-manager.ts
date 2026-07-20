@@ -10,7 +10,6 @@ import {
 import {
 	type CodexUsageSnapshot,
 	getQuotaCooldownResetAt,
-	isFreshUsageHealthyForQuotaCooldown,
 } from "../usage/usage";
 import { fetchCodexUsage } from "../usage/usage-client";
 import {
@@ -570,22 +569,13 @@ export class AccountManager {
 				continue;
 			}
 
-			const usage = await this.refreshUsageForAccount(account, {
+			await this.refreshUsageForAccount(account, {
 				force: true,
 				signal: options?.signal,
 				warningHandler: options?.warningHandler,
 			});
 			if (!account.quotaExhaustedUntil) {
 				cleared += 1;
-				continue;
-			}
-			if (
-				isFreshUsageConfirmation(usage) &&
-				isFreshUsageHealthyForQuotaCooldown(usage.snapshot)
-			) {
-				account.quotaExhaustedUntil = undefined;
-				cleared += 1;
-				changed = true;
 			}
 		}
 
@@ -696,7 +686,7 @@ export class AccountManager {
 			) {
 				options.warningHandler(result.warning.message);
 			}
-			this.clearQuotaCooldownAfterFreshWeeklyUsage(account, result);
+			this.clearQuotaCooldownWhenFreshUsageRemains(account, result);
 			return result;
 		} catch (error) {
 			(options?.warningHandler ?? this.warningHandler)?.(
@@ -711,22 +701,32 @@ export class AccountManager {
 		}
 	}
 
-	private clearQuotaCooldownAfterFreshWeeklyUsage(
+	private clearQuotaCooldownWhenFreshUsageRemains(
 		account: Account,
 		result: UsageRefreshResult,
 	): void {
-		const weeklyUsedPercent = result.snapshot?.secondary?.usedPercent;
+		const primaryUsedPercent = result.snapshot?.primary?.usedPercent;
+		const secondaryUsedPercent = result.snapshot?.secondary?.usedPercent;
+		const effectiveUsedPercent =
+			typeof primaryUsedPercent === "number" &&
+			Number.isFinite(primaryUsedPercent)
+				? primaryUsedPercent
+				: secondaryUsedPercent;
+		const hasRemainingUsage =
+			typeof effectiveUsedPercent === "number" &&
+			Number.isFinite(effectiveUsedPercent) &&
+			effectiveUsedPercent >= 0 &&
+			effectiveUsedPercent < 100;
 		if (
 			!account.quotaExhaustedUntil ||
 			!isFreshUsageConfirmation(result) ||
-			typeof weeklyUsedPercent !== "number" ||
-			weeklyUsedPercent <= 0
+			!hasRemainingUsage
 		) {
 			return;
 		}
 
-		// A fresh weekly reading is authoritative over the local marker, which can
-		// otherwise survive an account's recovered quota state indefinitely.
+		// The 5h window is the effective limit when known; otherwise weekly usage
+		// becomes authoritative. Any remaining effective quota proves this stale.
 		account.quotaExhaustedUntil = undefined;
 		this.save();
 		this.notifyStateChanged();
