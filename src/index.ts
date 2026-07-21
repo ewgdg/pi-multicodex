@@ -11,9 +11,7 @@ export type { Account } from "./accounts/storage";
 export { default } from "./extension/extension";
 export {
 	buildMulticodexProviderConfig,
-	getOpenAICodexMirror,
 	PROVIDER_ID,
-	type ProviderModelDef,
 } from "./provider/provider";
 export { isQuotaErrorMessage } from "./provider/quota";
 export { createStreamWrapper } from "./provider/stream-wrapper";

@@ -1,4 +1,3 @@
-import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { describe, expect, it, vi } from "vitest";
 import {
 	type Account,
@@ -6,7 +5,6 @@ import {
 	buildMulticodexProviderConfig,
 	createStreamWrapper,
 	getNextResetAt,
-	getOpenAICodexMirror,
 	getPlanCapacityMultiplier,
 	getQuotaCooldownResetAt,
 	getWeeklyResetAt,
@@ -40,36 +38,8 @@ describe("isQuotaErrorMessage", () => {
 	});
 });
 
-describe("getOpenAICodexMirror", () => {
-	it("mirrors the openai-codex provider models exactly (metadata)", () => {
-		const sourceModels = getBuiltinModels("openai-codex");
-		const expected = {
-			baseUrl: sourceModels[0]?.baseUrl || "https://chatgpt.com/backend-api",
-			models: sourceModels.map((m) => ({
-				id: m.id,
-				name: m.name,
-				api: m.api,
-				baseUrl: m.baseUrl,
-				reasoning: m.reasoning,
-				thinkingLevelMap: m.thinkingLevelMap
-					? { ...m.thinkingLevelMap }
-					: undefined,
-				input: [...m.input],
-				cost: { ...m.cost },
-				contextWindow: m.contextWindow,
-				maxTokens: m.maxTokens,
-				headers: m.headers ? { ...m.headers } : undefined,
-				compat: m.compat,
-			})),
-		};
-
-		expect(getOpenAICodexMirror()).toEqual(expected);
-	});
-});
-
 describe("buildMulticodexProviderConfig", () => {
-	it("uses mirrored models and baseUrl", () => {
-		const mirror = getOpenAICodexMirror();
+	it("registers account routing without overriding provider metadata", () => {
 		const fakeManager = {
 			getActiveAccount: () => ({
 				accessToken: "test-jwt.eyJ0ZXN0IjoxfQ.sig",
@@ -81,9 +51,9 @@ describe("buildMulticodexProviderConfig", () => {
 
 		expect(config.api).toBe("openai-codex-responses");
 		expect(config.apiKey).toBe("test-jwt.eyJ0ZXN0IjoxfQ.sig");
-		expect(config.baseUrl).toBe(mirror.baseUrl);
-		expect(config.models).toEqual(mirror.models);
 		expect(config.streamSimple).toBeTypeOf("function");
+		expect(config).not.toHaveProperty("models");
+		expect(config).not.toHaveProperty("baseUrl");
 	});
 });
 
