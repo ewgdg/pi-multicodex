@@ -14,6 +14,7 @@ import {
 	parseCodexUsageResponse,
 	pickBestAccount,
 } from "./index";
+import { buildMulticodexProviderBootstrapConfig } from "./provider/provider";
 
 describe("isQuotaErrorMessage", () => {
 	it("matches 429", () => {
@@ -39,6 +40,23 @@ describe("isQuotaErrorMessage", () => {
 });
 
 describe("buildMulticodexProviderConfig", () => {
+	it("bootstraps managed auth without replacing the active transport", () => {
+		const fakeManager = {
+			getActiveAccount: () => ({
+				accessToken: "test-jwt.eyJ0ZXN0IjoxfQ.sig",
+				needsReauth: false,
+			}),
+			getAccounts: () => [],
+		} as unknown as AccountManager;
+		const config = buildMulticodexProviderBootstrapConfig(fakeManager);
+
+		expect(config).toEqual({
+			api: "openai-codex-responses",
+			apiKey: "test-jwt.eyJ0ZXN0IjoxfQ.sig",
+		});
+		expect(config).not.toHaveProperty("streamSimple");
+	});
+
 	it("registers account routing without overriding provider metadata", () => {
 		const fakeManager = {
 			getActiveAccount: () => ({
@@ -54,6 +72,132 @@ describe("buildMulticodexProviderConfig", () => {
 		expect(config.streamSimple).toBeTypeOf("function");
 		expect(config).not.toHaveProperty("models");
 		expect(config).not.toHaveProperty("baseUrl");
+	});
+
+	it("routes account credentials and stream options through an external transport", async () => {
+		const account = makeAccount("external@example.com");
+		const accountManager = {
+			waitUntilReady: async () => {},
+			getActiveAccount: () => account,
+			getAccounts: () => [account],
+			getAvailableManualAccount: () => undefined,
+			hasManualAccount: () => false,
+			clearManualAccount: () => {},
+			getAvailableActiveAccount: () => account,
+			activateBestAccount: async () => undefined,
+			ensureValidToken: async () => "external-token",
+			handleQuotaExceeded: async () => {},
+			recordUsageConsumption: () => {},
+		} as unknown as AccountManager;
+		const externalStreamSimple = vi.fn(
+			(_model: unknown, _context: unknown, _options: unknown) => {
+				async function* inner() {
+					yield { type: "done" };
+				}
+				return inner();
+			},
+		);
+		const config = buildMulticodexProviderConfig(
+			accountManager,
+			externalStreamSimple as never,
+		);
+		const context = {} as StreamContext;
+		const parentAbortController = new AbortController();
+		const onPayload = vi.fn();
+		const onResponse = vi.fn();
+		const stream = config.streamSimple(
+			{
+				id: "test",
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+				headers: { "X-Existing": "preserved" },
+			} as unknown as StreamModel,
+			context,
+			{
+				signal: parentAbortController.signal,
+				onPayload,
+				onResponse,
+			} as never,
+		);
+
+		for await (const _event of stream) {
+			// drain
+		}
+
+		const [receivedModel, receivedContext, receivedOptions] =
+			externalStreamSimple.mock.calls[0] as unknown as [
+				{ headers: Record<string, string> },
+				unknown,
+				{
+					apiKey: string;
+					signal: AbortSignal;
+					onPayload: unknown;
+					onResponse: unknown;
+				},
+			];
+		expect(receivedModel.headers).toEqual({
+			"X-Existing": "preserved",
+			"X-Multicodex-Account": "external@example.com",
+		});
+		expect(receivedContext).toBe(context);
+		expect(receivedOptions).toMatchObject({
+			apiKey: "external-token",
+			onPayload,
+			onResponse,
+		});
+		expect(receivedOptions.signal).not.toBe(parentAbortController.signal);
+		parentAbortController.abort();
+		expect(receivedOptions.signal.aborted).toBe(true);
+	});
+
+	it("does not retain a previous MultiCodex wrapper when the extension reloads", async () => {
+		const account = makeAccount("reload@example.com");
+		const createManager = (waitUntilReady: ReturnType<typeof vi.fn>) =>
+			({
+				waitUntilReady,
+				getActiveAccount: () => account,
+				getAccounts: () => [account],
+				getAvailableManualAccount: () => undefined,
+				hasManualAccount: () => false,
+				clearManualAccount: () => {},
+				getAvailableActiveAccount: () => account,
+				activateBestAccount: async () => undefined,
+				ensureValidToken: async () => "reload-token",
+				handleQuotaExceeded: async () => {},
+				recordUsageConsumption: () => {},
+			}) as unknown as AccountManager;
+		const staleManagerWait = vi.fn(async () => {});
+		const currentManagerWait = vi.fn(async () => {});
+		const externalStreamSimple = vi.fn(() => {
+			async function* inner() {
+				yield { type: "done" };
+			}
+			return inner();
+		});
+		const previousConfig = buildMulticodexProviderConfig(
+			createManager(staleManagerWait),
+			externalStreamSimple as never,
+		);
+		const reloadedConfig = buildMulticodexProviderConfig(
+			createManager(currentManagerWait),
+			previousConfig.streamSimple,
+		);
+
+		const stream = reloadedConfig.streamSimple(
+			{
+				id: "test",
+				provider: "openai-codex",
+				api: "openai-codex-responses",
+			} as StreamModel,
+			{} as StreamContext,
+		);
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect(currentManagerWait).toHaveBeenCalledOnce();
+		expect(staleManagerWait).not.toHaveBeenCalled();
+		expect(externalStreamSimple).toHaveBeenCalledOnce();
 	});
 });
 

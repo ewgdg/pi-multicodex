@@ -38,6 +38,10 @@ Restart pi. That is all you need — MultiCodex takes over the normal `openai-co
 
 To manage your accounts inside a session, type `/multicodex`.
 
+### Custom Codex transports
+
+MultiCodex can route accounts through another extension's `openai-codex` transport, including `@howaboua/pi-codex-conversion`. No package order is required. MultiCodex registers managed-account auth without replacing the active transport, then wraps the effective Codex transport at session start.
+
 ## How it works
 
 When you start a session, MultiCodex:
@@ -138,4 +142,3 @@ MultiCodex stores all data locally under `~/.pi/agent/`:
 | `state/multicodex/usage-coordination/<sha256>/` | Credential-free shared usage state and short advisory leases |
 
 Coordination paths use the full SHA-256 digest of the normalized account email; raw email addresses and credentials are never written to coordination artifacts. Coordination supports local filesystems only—NFS, SMB, and virtualization-mounted agent directories are outside its correctness contract. No data is sent anywhere except to the Codex API endpoints for auth refresh and usage queries.
-

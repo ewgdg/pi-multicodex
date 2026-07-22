@@ -1,20 +1,42 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({
-	registerCommands: vi.fn(),
-	handleSessionStart: vi.fn(),
-	handleNewSessionSwitch: vi.fn(),
-	buildMulticodexProviderConfig: vi.fn(() => ({ mocked: true })),
-	resetSessionWarnings: vi.fn(),
-	startPiAuthWatch: vi.fn(),
-	stopPiAuthWatch: vi.fn(),
-	statusRefreshFor: vi.fn(),
-	statusStartSession: vi.fn(),
-	statusStopSession: vi.fn(),
-	statusLoadPreferences: vi.fn().mockResolvedValue(undefined),
-	statusScheduleModelSelectRefresh: vi.fn(),
-	statusSetUsageObserverActive: vi.fn(),
-}));
+const mocks = vi.hoisted(() => {
+	type StreamSimple = (...args: unknown[]) => unknown;
+	const wrappedBaseStreams = new WeakMap<
+		StreamSimple,
+		StreamSimple | undefined
+	>();
+	return {
+		registerCommands: vi.fn(),
+		handleSessionStart: vi.fn(),
+		handleNewSessionSwitch: vi.fn(),
+		buildMulticodexProviderBootstrapConfig: vi.fn(() => ({ bootstrap: true })),
+		buildMulticodexProviderConfig: vi.fn(
+			(_accountManager: unknown, baseStreamSimple?: StreamSimple) => {
+				const unwrappedBaseStreamSimple =
+					baseStreamSimple && wrappedBaseStreams.has(baseStreamSimple)
+						? wrappedBaseStreams.get(baseStreamSimple)
+						: baseStreamSimple;
+				const streamSimple = vi.fn((...args: unknown[]) =>
+					unwrappedBaseStreamSimple
+						? unwrappedBaseStreamSimple(...args)
+						: "built-in-stream",
+				);
+				wrappedBaseStreams.set(streamSimple, unwrappedBaseStreamSimple);
+				return { mocked: true, streamSimple };
+			},
+		),
+		resetSessionWarnings: vi.fn(),
+		startPiAuthWatch: vi.fn(),
+		stopPiAuthWatch: vi.fn(),
+		statusRefreshFor: vi.fn(),
+		statusStartSession: vi.fn(),
+		statusStopSession: vi.fn(),
+		statusLoadPreferences: vi.fn().mockResolvedValue(undefined),
+		statusScheduleModelSelectRefresh: vi.fn(),
+		statusSetUsageObserverActive: vi.fn(),
+	};
+});
 
 vi.mock("../accounts/account-manager", () => ({
 	AccountManager: class MockAccountManager {
@@ -35,6 +57,8 @@ vi.mock("./hooks", () => ({
 
 vi.mock("../provider/provider", () => ({
 	PROVIDER_ID: "openai-codex",
+	buildMulticodexProviderBootstrapConfig:
+		mocks.buildMulticodexProviderBootstrapConfig,
 	buildMulticodexProviderConfig: mocks.buildMulticodexProviderConfig,
 }));
 
@@ -58,10 +82,44 @@ function createMockContext(
 	return {
 		ui: { notify: vi.fn() },
 		model: { provider },
+		modelRegistry: {
+			getRegisteredProviderConfig: () => undefined,
+		},
 		sessionManager: {
 			getSessionFile: () => sessionKey,
 			getSessionId: () => sessionKey,
 		},
+	};
+}
+
+function createProviderRegistrationHarness(
+	initialProviderConfig?: Record<string, unknown>,
+) {
+	const handlers = new Map<string, (...args: unknown[]) => unknown>();
+	let registeredProviderConfig = initialProviderConfig;
+	const registerProvider = vi.fn(
+		(_providerId: string, config: Record<string, unknown>) => {
+			registeredProviderConfig = { ...registeredProviderConfig, ...config };
+		},
+	);
+	multicodexExtension({
+		registerProvider,
+		on: vi.fn((event: string, handler: (...args: unknown[]) => unknown) => {
+			handlers.set(event, handler);
+		}),
+	} as never);
+	const ctx = {
+		...createMockContext(),
+		modelRegistry: {
+			getRegisteredProviderConfig: () => registeredProviderConfig,
+		},
+	};
+
+	return {
+		ctx,
+		handlers,
+		registerProvider,
+		getProviderConfig: () => registeredProviderConfig,
 	};
 }
 
@@ -72,6 +130,7 @@ describe("multicodexExtension", () => {
 		mocks.handleSessionStart.mockResolvedValue(undefined);
 		mocks.handleNewSessionSwitch.mockReset();
 		mocks.handleNewSessionSwitch.mockResolvedValue(undefined);
+		mocks.buildMulticodexProviderBootstrapConfig.mockClear();
 		mocks.buildMulticodexProviderConfig.mockClear();
 		mocks.resetSessionWarnings.mockClear();
 		mocks.startPiAuthWatch.mockClear();
@@ -96,9 +155,10 @@ describe("multicodexExtension", () => {
 			on,
 		} as never);
 
-		expect(mocks.buildMulticodexProviderConfig).toHaveBeenCalledOnce();
+		expect(mocks.buildMulticodexProviderBootstrapConfig).toHaveBeenCalledOnce();
+		expect(mocks.buildMulticodexProviderConfig).not.toHaveBeenCalled();
 		expect(registerProvider).toHaveBeenCalledWith("openai-codex", {
-			mocked: true,
+			bootstrap: true,
 		});
 		expect(mocks.registerCommands).toHaveBeenCalledOnce();
 		expect(on).toHaveBeenCalledTimes(4);
@@ -106,6 +166,118 @@ describe("multicodexExtension", () => {
 		expect(handlers.has("turn_end")).toBe(true);
 		expect(handlers.has("model_select")).toBe(true);
 		expect(handlers.has("session_shutdown")).toBe(true);
+	});
+
+	it("routes through Pi's built-in Codex transport when no extension provides one", async () => {
+		const harness = createProviderRegistrationHarness();
+		await harness.handlers.get("session_start")?.(
+			{ reason: "resume" },
+			harness.ctx as never,
+		);
+
+		const selectedStreamSimple = harness.getProviderConfig()?.streamSimple as (
+			...args: unknown[]
+		) => unknown;
+		expect(selectedStreamSimple("model", "context", "options")).toBe(
+			"built-in-stream",
+		);
+		expect(harness.registerProvider).toHaveBeenCalledTimes(2);
+	});
+
+	it("routes through an external Codex transport registered before MultiCodex", async () => {
+		const externalStreamSimple = vi.fn(() => "external-stream");
+		const harness = createProviderRegistrationHarness({
+			streamSimple: externalStreamSimple,
+		});
+		await harness.handlers.get("session_start")?.(
+			{ reason: "resume" },
+			harness.ctx as never,
+		);
+
+		const selectedStreamSimple = harness.getProviderConfig()?.streamSimple as (
+			...args: unknown[]
+		) => unknown;
+		expect(selectedStreamSimple).not.toBe(externalStreamSimple);
+		expect(selectedStreamSimple("model", "context", "options")).toBe(
+			"external-stream",
+		);
+		expect(externalStreamSimple).toHaveBeenCalledWith(
+			"model",
+			"context",
+			"options",
+		);
+	});
+
+	it("routes through an external Codex transport registered after MultiCodex", async () => {
+		const externalStreamSimple = vi.fn(() => "external-stream");
+		const harness = createProviderRegistrationHarness();
+		harness.registerProvider("openai-codex", {
+			streamSimple: externalStreamSimple,
+		});
+		await harness.handlers.get("session_start")?.(
+			{ reason: "resume" },
+			harness.ctx as never,
+		);
+
+		const selectedStreamSimple = harness.getProviderConfig()?.streamSimple as (
+			...args: unknown[]
+		) => unknown;
+		expect(selectedStreamSimple).not.toBe(externalStreamSimple);
+		expect(mocks.buildMulticodexProviderConfig).toHaveBeenLastCalledWith(
+			expect.anything(),
+			externalStreamSimple,
+		);
+		expect(harness.registerProvider).toHaveBeenCalledTimes(3);
+		expect(selectedStreamSimple("model", "context", "options")).toBe(
+			"external-stream",
+		);
+		expect(externalStreamSimple).toHaveBeenCalledWith(
+			"model",
+			"context",
+			"options",
+		);
+
+		await harness.handlers.get("session_start")?.(
+			{ reason: "resume" },
+			harness.ctx as never,
+		);
+		expect(mocks.buildMulticodexProviderConfig).toHaveBeenCalledOnce();
+		expect(harness.registerProvider).toHaveBeenCalledTimes(3);
+	});
+
+	it("replaces the previous extension instance's wrapper after reload", async () => {
+		const externalStreamSimple = vi.fn(() => "external-stream");
+		const harness = createProviderRegistrationHarness({
+			streamSimple: externalStreamSimple,
+		});
+		await harness.handlers.get("session_start")?.(
+			{ reason: "resume" },
+			harness.ctx as never,
+		);
+		const previousStreamSimple = harness.getProviderConfig()
+			?.streamSimple as ReturnType<typeof vi.fn>;
+		const reloadedHandlers = new Map<string, (...args: unknown[]) => unknown>();
+
+		multicodexExtension({
+			registerProvider: harness.registerProvider,
+			on: vi.fn((event: string, handler: (...args: unknown[]) => unknown) => {
+				reloadedHandlers.set(event, handler);
+			}),
+		} as never);
+		await reloadedHandlers.get("session_start")?.(
+			{ reason: "reload" },
+			harness.ctx as never,
+		);
+
+		const selectedStreamSimple = harness.getProviderConfig()?.streamSimple as (
+			...args: unknown[]
+		) => unknown;
+		expect(selectedStreamSimple("model", "context", "options")).toBe(
+			"external-stream",
+		);
+		expect(previousStreamSimple).not.toHaveBeenCalled();
+		expect(externalStreamSimple).toHaveBeenCalledOnce();
+		expect(harness.registerProvider).toHaveBeenCalledTimes(4);
 	});
 
 	it("awaits startup session work before continuing", async () => {

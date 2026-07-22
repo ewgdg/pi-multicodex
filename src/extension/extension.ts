@@ -6,6 +6,7 @@ import type {
 import { AccountManager } from "../accounts/account-manager";
 import { normalizeUnknownError } from "../platform/streams";
 import {
+	buildMulticodexProviderBootstrapConfig,
 	buildMulticodexProviderConfig,
 	PROVIDER_ID,
 } from "../provider/provider";
@@ -20,6 +21,9 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 	let lifecycleVersion = 0;
 	let activeModelProvider: string | undefined;
 	let managedStartupInitialized = false;
+	let multicodexStreamSimple:
+		| ReturnType<typeof buildMulticodexProviderConfig>["streamSimple"]
+		| undefined;
 
 	function getSessionKey(ctx: ExtensionContext): string | undefined {
 		try {
@@ -66,6 +70,26 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 			return event.model as ExtensionContext["model"];
 		}
 		return undefined;
+	}
+
+	function wrapEffectiveCodexTransport(ctx: ExtensionContext): void {
+		const effectiveStreamSimple =
+			ctx.modelRegistry.getRegisteredProviderConfig(PROVIDER_ID)?.streamSimple;
+		if (
+			multicodexStreamSimple &&
+			effectiveStreamSimple === multicodexStreamSimple
+		) {
+			return;
+		}
+
+		// All extensions are loaded before session_start, so their effective Codex
+		// transport is visible here; without one, the provider builder uses Pi's.
+		const providerConfig = buildMulticodexProviderConfig(
+			accountManager,
+			effectiveStreamSimple,
+		);
+		multicodexStreamSimple = providerConfig.streamSimple;
+		pi.registerProvider(PROVIDER_ID, providerConfig);
 	}
 
 	function notifyIfCurrent(
@@ -119,9 +143,11 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 		}
 	}
 
+	// Auth metadata keeps managed accounts selectable before session_start without
+	// overwriting a Codex transport that another extension already registered.
 	pi.registerProvider(
 		PROVIDER_ID,
-		buildMulticodexProviderConfig(accountManager),
+		buildMulticodexProviderBootstrapConfig(accountManager),
 	);
 
 	registerCommands(pi, accountManager, statusController);
@@ -129,6 +155,7 @@ export default function multicodexExtension(pi: ExtensionAPI) {
 	pi.on(
 		"session_start",
 		async (event: SessionStartEvent, ctx: ExtensionContext) => {
+			wrapEffectiveCodexTransport(ctx);
 			activeSessionKey = getSessionKey(ctx);
 			activeModelProvider = ctx.model?.provider;
 			lifecycleVersion += 1;
